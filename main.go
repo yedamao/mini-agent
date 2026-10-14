@@ -1,8 +1,10 @@
-// Day 3: an agent loop with file and shell tools (see tools.go), no frameworks.
-// Run: go run . "what time is it?"   (uses $DEEPSEEK_API_KEY by default)
+// mini-agent: an agent loop with file and shell tools (tools.go) and
+// context management (context.go), no frameworks.
+// Run: go run . "what time is it?"   or   go run . -i   for an interactive session.
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -50,21 +52,29 @@ type Block struct {
 	Content   string          `json:"content,omitempty"`
 }
 
+type Usage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
 type Response struct {
 	Content    []Block `json:"content"`
 	StopReason string  `json:"stop_reason"`
+	Usage      Usage   `json:"usage"`
 }
 
-func call(msgs []Message) (*Response, error) {
-	body, _ := json.Marshal(map[string]any{
-		"model": model, "max_tokens": 4096, "system": systemPrompt,
-		"tools": tools, "messages": msgs,
-	})
-	req, _ := http.NewRequest("POST", baseURL+"/v1/messages", bytes.NewReader(body))
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-	req.Header.Set("content-type", "application/json")
-	res, err := http.DefaultClient.Do(req)
+// callModel sends one request. withTools=false is used for summarization.
+func callModel(system string, msgs []Message, withTools bool) (*Response, error) {
+	req := map[string]any{"model": model, "max_tokens": 4096, "system": system, "messages": msgs}
+	if withTools {
+		req["tools"] = tools
+	}
+	body, _ := json.Marshal(req)
+	hreq, _ := http.NewRequest("POST", baseURL+"/v1/messages", bytes.NewReader(body))
+	hreq.Header.Set("x-api-key", apiKey)
+	hreq.Header.Set("anthropic-version", "2023-06-01")
+	hreq.Header.Set("content-type", "application/json")
+	res, err := http.DefaultClient.Do(hreq)
 	if err != nil {
 		return nil, err
 	}
@@ -78,20 +88,49 @@ func call(msgs []Message) (*Response, error) {
 }
 
 func main() {
+	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "-i" {
+		repl()
+		return
+	}
 	prompt := "What time is it right now?"
-	if len(os.Args) > 1 {
-		prompt = strings.Join(os.Args[1:], " ")
+	if len(args) > 0 {
+		prompt = strings.Join(args, " ")
 	}
 	msgs := []Message{{Role: "user", Content: prompt}}
+	if _, ok := runAgent(msgs); !ok {
+		os.Exit(2)
+	}
+}
 
-	// The agent loop: call the model, run any tools it asks for, send results back.
-	// Stop when the model answers without a tool call, or after maxSteps.
+// repl keeps one conversation going across prompts (type "exit" to quit).
+func repl() {
+	var msgs []Message
+	in := bufio.NewScanner(os.Stdin)
+	for {
+		fmt.Fprint(os.Stderr, "> ")
+		if !in.Scan() || in.Text() == "exit" {
+			return
+		}
+		if strings.TrimSpace(in.Text()) == "" {
+			continue
+		}
+		msgs = append(msgs, Message{Role: "user", Content: in.Text()})
+		msgs, _ = runAgent(msgs)
+	}
+}
+
+// runAgent is the agent loop: call the model, run any tools it asks for,
+// send results back, and keep the context small. It returns the updated
+// history and false if it hit maxSteps.
+func runAgent(msgs []Message) ([]Message, bool) {
 	for step := 1; step <= maxSteps; step++ {
-		r, err := call(msgs)
+		r, err := callModel(systemPrompt, msgs, true)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		logUsage(fmt.Sprintf("step %d", step), r.Usage)
 		msgs = append(msgs, Message{Role: "assistant", Content: r.Content})
 		var results []Block
 		for _, b := range r.Content {
@@ -107,10 +146,25 @@ func main() {
 			}
 		}
 		if r.StopReason != "tool_use" {
-			return
+			return msgs, true
 		}
 		msgs = append(msgs, Message{Role: "user", Content: results})
+
+		// Cheap first: stub out old tool results.
+		if n := trimOldResults(msgs); n > 0 {
+			fmt.Fprintf(os.Stderr, "[context] trimmed %d old tool results\n", n)
+		}
+		// Then, if the last prompt was over budget, summarize the middle.
+		if r.Usage.InputTokens > contextBudget {
+			before := len(msgs)
+			if msgs, err = compact(msgs); err != nil {
+				fmt.Fprintln(os.Stderr, "[context] compaction failed:", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "[context] input %d > budget %d: compacted %d -> %d messages\n",
+					r.Usage.InputTokens, contextBudget, before, len(msgs))
+			}
+		}
 	}
 	fmt.Fprintf(os.Stderr, "stopped: hit the %d-step limit without a final answer\n", maxSteps)
-	os.Exit(2)
+	return msgs, false
 }

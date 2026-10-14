@@ -22,3 +22,15 @@ Day 5: a coding agent. `examples/buggy/` is a separate module with a failing tes
     /tmp/mini-agent "the tests in this directory fail; find and fix the bug, then confirm go test passes"
 
 See `examples/buggy/RUN.md` for a sample run. Afterwards, `git checkout examples/buggy` restores the bug.
+
+Day 6-7: context management (`context.go`).
+- Every step logs token usage to stderr: `[step 3] tokens in=… out=… | total in=… out=…`.
+- Tool results older than 6 messages are replaced with short stubs (cheap).
+- When a prompt goes over `AGENT_CONTEXT_BUDGET` input tokens (default 50000), the
+  middle of the history is replaced by a model-written summary. The first task and the
+  last few turns stay, and a tool call is never separated from its result.
+- `go run . -i` starts an interactive session, so one conversation continues across prompts.
+
+Watch compaction happen with a tiny budget:
+
+    AGENT_CONTEXT_BUDGET=3000 go run . "read all the .go files here and explain the architecture"
