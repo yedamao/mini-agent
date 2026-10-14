@@ -1,4 +1,4 @@
-// Day 1: one model call with one tool (get_time), no frameworks.
+// Day 3: an agent loop with file and shell tools (see tools.go), no frameworks.
 // Run: go run . "what time is it?"   (uses $DEEPSEEK_API_KEY by default)
 package main
 
@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 )
 
 // Works with Anthropic or any Anthropic-compatible API (e.g. DeepSeek).
@@ -19,6 +18,9 @@ var (
 	model   = env("AGENT_MODEL", "deepseek-chat")
 	apiKey  = env("AGENT_API_KEY", os.Getenv("DEEPSEEK_API_KEY"))
 )
+
+// maxSteps caps the loop so a confused model can't run forever.
+const maxSteps = 20
 
 func env(k, def string) string {
 	if v := os.Getenv(k); v != "" {
@@ -45,20 +47,6 @@ type Block struct {
 type Response struct {
 	Content    []Block `json:"content"`
 	StopReason string  `json:"stop_reason"`
-}
-
-var tools = []map[string]any{{
-	"name":         "get_time",
-	"description":  "Returns the current local date and time.",
-	"input_schema": map[string]any{"type": "object", "properties": map[string]any{}},
-}}
-
-func runTool(name string, _ json.RawMessage) string {
-	switch name {
-	case "get_time":
-		return time.Now().Format(time.RFC1123)
-	}
-	return "unknown tool: " + name
 }
 
 func call(msgs []Message) (*Response, error) {
@@ -89,8 +77,9 @@ func main() {
 	}
 	msgs := []Message{{Role: "user", Content: prompt}}
 
-	// Day 3 turns this into a real loop with a step cap.
-	for step := 1; step <= 5; step++ {
+	// The agent loop: call the model, run any tools it asks for, send results back.
+	// Stop when the model answers without a tool call, or after maxSteps.
+	for step := 1; step <= maxSteps; step++ {
 		r, err := call(msgs)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -104,7 +93,9 @@ func main() {
 				fmt.Println(b.Text)
 			case "tool_use":
 				out := runTool(b.Name, b.Input)
-				fmt.Printf("[step %d] tool %s -> %s\n", step, b.Name, out)
+				// Log to stderr so stdout stays just the model's answer.
+				fmt.Fprintf(os.Stderr, "[step %d] %s %s -> %s\n",
+					step, b.Name, preview(string(b.Input), 80), preview(out, 120))
 				results = append(results, Block{Type: "tool_result", ToolUseID: b.ID, Content: out})
 			}
 		}
@@ -113,4 +104,6 @@ func main() {
 		}
 		msgs = append(msgs, Message{Role: "user", Content: results})
 	}
+	fmt.Fprintf(os.Stderr, "stopped: hit the %d-step limit without a final answer\n", maxSteps)
+	os.Exit(2)
 }
