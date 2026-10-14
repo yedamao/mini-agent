@@ -1,106 +1,94 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// roundTrip sends one JSON line to handle and decodes the reply generically.
-func roundTrip(t *testing.T, line string) map[string]any {
+// connect runs the server and an SDK client over in-memory transports,
+// so the tests exercise the real protocol without a subprocess.
+func connect(t *testing.T) *mcp.ClientSession {
 	t.Helper()
-	resp := handle([]byte(line))
-	if resp == nil {
-		return nil
-	}
-	raw, err := json.Marshal(resp)
+	ctx := context.Background()
+	ct, st := mcp.NewInMemoryTransports()
+	ss, err := newServer().Connect(ctx, st, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var m map[string]any
-	json.Unmarshal(raw, &m)
-	return m
+	t.Cleanup(func() { ss.Close() })
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cs.Close() })
+	return cs
 }
 
-func TestInitialize(t *testing.T) {
-	m := roundTrip(t, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}`)
-	res := m["result"].(map[string]any)
-	if res["protocolVersion"] != protocolVersion || res["capabilities"].(map[string]any)["tools"] == nil {
-		t.Errorf("bad initialize result: %v", res)
+func call(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any) (string, bool) {
+	t.Helper()
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatalf("%s: %v", name, err)
 	}
-	if m["id"] != 1.0 {
-		t.Errorf("id not echoed: %v", m["id"])
-	}
-}
-
-func TestNotificationGetsNoReply(t *testing.T) {
-	if m := roundTrip(t, `{"jsonrpc":"2.0","method":"notifications/initialized"}`); m != nil {
-		t.Errorf("got reply %v", m)
-	}
-}
-
-func TestToolsList(t *testing.T) {
-	m := roundTrip(t, `{"jsonrpc":"2.0","id":"a","method":"tools/list"}`)
-	list := m["result"].(map[string]any)["tools"].([]any)
-	var names []string
-	for _, x := range list {
-		tl := x.(map[string]any)
-		names = append(names, tl["name"].(string))
-		if tl["inputSchema"] == nil {
-			t.Errorf("%v has no inputSchema", tl["name"])
+	var parts []string
+	for _, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			parts = append(parts, tc.Text)
 		}
 	}
-	if strings.Join(names, ",") != "get_time,word_count,go_test" {
-		t.Errorf("tools = %v", names)
-	}
+	return strings.Join(parts, "\n"), res.IsError
 }
 
-func callText(t *testing.T, name, args string) (string, bool) {
-	t.Helper()
-	m := roundTrip(t, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"`+name+`","arguments":`+args+`}}`)
-	res, ok := m["result"].(map[string]any)
-	if !ok {
-		t.Fatalf("no result: %v", m)
+func TestListTools(t *testing.T) {
+	res, err := connect(t).ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	content := res["content"].([]any)[0].(map[string]any)
-	return content["text"].(string), res["isError"].(bool)
+	var names []string
+	for _, tl := range res.Tools {
+		names = append(names, tl.Name)
+		if tl.InputSchema == nil {
+			t.Errorf("%s has no input schema", tl.Name)
+		}
+	}
+	if got := strings.Join(names, ","); got != "get_time,go_test,word_count" { // SDK lists tools sorted
+		t.Errorf("tools = %s", got)
+	}
 }
 
 func TestWordCount(t *testing.T) {
-	text, isErr := callText(t, "word_count", `{"text":"hello big world\nsecond line\n"}`)
-	if isErr || text != "words: 5, lines: 2, characters: 28" {
-		t.Errorf("got %q (isError=%v)", text, isErr)
+	got, isErr := call(t, connect(t), "word_count", map[string]any{"text": "hello big world\nsecond line\n"})
+	if isErr || got != "words: 5, lines: 2, characters: 28" {
+		t.Errorf("got %q (isError=%v)", got, isErr)
 	}
 }
 
-func TestGoTest(t *testing.T) {
+func TestWordCountValidatesInput(t *testing.T) {
+	// The SDK checks arguments against the generated schema: text must be a string.
+	cs := connect(t)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "word_count", Arguments: map[string]any{"text": 42}})
+	if err == nil && !res.IsError {
+		t.Error("want an error for a non-string text")
+	}
+}
+
+func TestGetTime(t *testing.T) {
+	if got, isErr := call(t, connect(t), "get_time", map[string]any{}); isErr || got == "" {
+		t.Errorf("got %q (isError=%v)", got, isErr)
+	}
+}
+
+func TestGoTestReportsFailure(t *testing.T) {
 	dir := t.TempDir()
-	write := func(name, body string) {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("go.mod", "module tmp\n\ngo 1.21\n")
-	write("x_test.go", "package tmp\nimport \"testing\"\nfunc TestFail(t *testing.T) { t.Fatal(\"boom\") }\n")
-	text, isErr := callText(t, "go_test", `{"dir":"`+dir+`"}`)
-	if !isErr || !strings.Contains(text, "boom") {
-		t.Errorf("want failing test reported as isError, got %q (isError=%v)", text, isErr)
-	}
-}
-
-func TestErrors(t *testing.T) {
-	cases := map[string]float64{
-		`not json`: errParse,
-		`{"jsonrpc":"2.0","id":2,"method":"nope"}`:                                   errMethodNotFound,
-		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"missing"}}`: errInvalidParams,
-	}
-	for line, code := range cases {
-		m := roundTrip(t, line)
-		e, ok := m["error"].(map[string]any)
-		if !ok || e["code"] != code {
-			t.Errorf("%s: got %v, want code %v", line, m, code)
-		}
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module tmp\n\ngo 1.21\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "x_test.go"), []byte("package tmp\nimport \"testing\"\nfunc TestFail(t *testing.T) { t.Fatal(\"boom\") }\n"), 0o644)
+	got, isErr := call(t, connect(t), "go_test", map[string]any{"dir": dir})
+	if !isErr || !strings.Contains(got, "boom") {
+		t.Errorf("want failure as isError, got %q (isError=%v)", got, isErr)
 	}
 }

@@ -1,48 +1,27 @@
-// mini-mcp: a tiny MCP (Model Context Protocol) server, standard library only.
+// mini-mcp: an MCP server built on the official Go SDK
+// (github.com/modelcontextprotocol/go-sdk). The SDK handles the JSON-RPC
+// protocol, the initialize handshake, input schemas generated from the Go
+// structs and argument validation, so we only write the tools.
 //
-// How MCP over stdio works:
-//   - The client (e.g. Claude Code) starts this program and talks to it over
-//     stdin/stdout. Each message is one JSON-RPC 2.0 object on its own line.
-//   - stdout is reserved for protocol messages; logs must go to stderr.
-//   - A request has an "id" and expects a response with the same id.
-//     A notification has no "id" and gets no response.
-//
-// The conversation:
-//  1. client -> initialize                 (we reply with our capabilities)
-//  2. client -> notifications/initialized  (no reply)
-//  3. client -> tools/list                 (we reply with tool names + JSON schemas)
-//  4. client -> tools/call                 (we run a tool and reply with its output)
-//
-// Usage: build it, then register it, e.g.
+// To see what the SDK does for you, read ../../examples/mcp-from-scratch.
 //
 //	go build -o ~/.local/bin/mini-mcp ./cmd/mcp-server
 //	claude mcp add --scope user mini-mcp -- ~/.local/bin/mini-mcp
 package main
 
 import (
-	"bufio"
-	"encoding/json"
-	"fmt"
+	"context"
+	"log"
 	"os"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func main() {
-	in := bufio.NewScanner(os.Stdin)
-	in.Buffer(make([]byte, 1024*1024), 10*1024*1024) // allow big messages
-	out := json.NewEncoder(os.Stdout)                // Encode adds the trailing newline
-
-	for in.Scan() {
-		resp := handle(in.Bytes())
-		if resp == nil {
-			continue // notification: nothing to send back
-		}
-		if err := out.Encode(resp); err != nil {
-			fmt.Fprintln(os.Stderr, "write:", err)
-			return
-		}
+	// stdout carries the protocol, so logs must go to stderr.
+	log.SetOutput(os.Stderr)
+	// Run serves over stdin/stdout until the client disconnects.
+	if err := newServer().Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+		log.Fatal(err)
 	}
-	if err := in.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "read:", err)
-	}
-	// EOF on stdin means the client is gone: exit quietly.
 }

@@ -47,24 +47,25 @@ Day 6-7 fixes:
 - Sample run with `AGENT_CONTEXT_BUDGET=3000`: `examples/RUN-context.md`.
 
 Day 8: an MCP server, and the agent as an MCP client.
-- `cmd/mcp-server` is a stdio MCP server written with the standard library only, so you
-  can see the whole protocol: newline-delimited JSON-RPC 2.0 with `initialize`,
-  `notifications/initialized`, `tools/list` and `tools/call`. Tools: `get_time`,
-  `word_count(text)`, `go_test(dir)` (60s timeout).
+- `cmd/mcp-server` is the server you'd ship. It's built on the official SDK,
+  `github.com/modelcontextprotocol/go-sdk/mcp`: `mcp.NewServer`, `mcp.AddTool` with typed
+  input structs (the SDK generates the JSON Schema and validates arguments), and
+  `server.Run(ctx, &mcp.StdioTransport{})`. Tools: `get_time`, `word_count(text)`,
+  `go_test(dir)` (60s timeout). Tests use `mcp.NewInMemoryTransports` with an SDK client.
 - Build it and add it to Claude Code:
 
       go build -o ~/.local/bin/mini-mcp ./cmd/mcp-server
       claude mcp add --scope user mini-mcp -- ~/.local/bin/mini-mcp
       claude mcp list
 
-- Talk to it by hand:
+- The agent can use any stdio MCP server's tools: `AGENT_MCP=~/.local/bin/mini-mcp go run . "..."`.
+  They show up as `mcp__<name>`. The client in `mcp.go` is hand-written to show the
+  handshake; for a real client, use the SDK's `mcp.NewClient` + `mcp.CommandTransport`.
+- `examples/mcp-from-scratch` is the same server written with the standard library only.
+  It's for learning the protocol (newline-delimited JSON-RPC 2.0: `initialize`,
+  `notifications/initialized`, `tools/list`, `tools/call`), not for shipping. Talk to it by hand:
 
       printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"me","version":"0"}}}' \
         '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
         '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"word_count","arguments":{"text":"hi there"}}}' \
-        | go run ./cmd/mcp-server
-
-- The agent can use any MCP server's tools: `AGENT_MCP=~/.local/bin/mini-mcp go run . "..."`.
-  They appear to the model as `mcp__<name>`.
-- For real projects, use the official SDK `github.com/modelcontextprotocol/go-sdk`. It
-  handles the protocol, other transports and schema generation for you.
+        | go run ./examples/mcp-from-scratch

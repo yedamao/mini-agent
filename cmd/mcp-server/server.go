@@ -2,193 +2,114 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// protocolVersion is the MCP spec revision we implement. If the client asks
-// for another version we answer with ours; the client decides if it can cope.
-const protocolVersion = "2025-06-18"
-
-// request is a JSON-RPC 2.0 request or notification (no ID).
-type request struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"` // number or string; echoed back as-is
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
-}
-
-// response is a JSON-RPC 2.0 response: exactly one of Result or Error is set.
-type response struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Result  any             `json:"result,omitempty"`
-	Error   *rpcError       `json:"error,omitempty"`
-}
-
-type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-// Standard JSON-RPC error codes.
-const (
-	errParse          = -32700
-	errInvalidRequest = -32600
-	errMethodNotFound = -32601
-	errInvalidParams  = -32602
+// Tool inputs are plain structs. The SDK builds each tool's JSON Schema from
+// the json and jsonschema tags and validates arguments before calling us.
+type (
+	noInput        struct{}
+	wordCountInput struct {
+		Text string `json:"text" jsonschema:"text to count"`
+	}
+	goTestInput struct {
+		Dir string `json:"dir" jsonschema:"directory containing the Go module or package"`
+	}
 )
 
-// tool is one entry in the tools/list result. InputSchema is a JSON Schema
-// describing the arguments, the same shape the model's tool API expects.
-type tool struct {
-	Name        string                                   `json:"name"`
-	Description string                                   `json:"description"`
-	InputSchema map[string]any                           `json:"inputSchema"`
-	run         func(args map[string]any) (string, bool) // (text, isError)
+// newServer creates the server and registers its tools. It is shared by
+// main (stdio) and the tests (in-memory transport).
+func newServer() *mcp.Server {
+	s := mcp.NewServer(&mcp.Implementation{Name: "mini-mcp", Version: "0.2.0"}, nil)
+	mcp.AddTool(s, &mcp.Tool{Name: "get_time", Description: "Returns the current local date and time."}, getTime)
+	mcp.AddTool(s, &mcp.Tool{Name: "word_count", Description: "Counts words, lines and characters in a piece of text."}, wordCount)
+	mcp.AddTool(s, &mcp.Tool{Name: "go_test", Description: "Runs `go test ./...` in a directory (60s timeout) and returns the output."}, goTest)
+	return s
 }
 
-var tools = []tool{
-	{
-		Name:        "get_time",
-		Description: "Returns the current local date and time.",
-		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
-		run: func(map[string]any) (string, bool) {
-			return time.Now().Format(time.RFC1123), false
-		},
-	},
-	{
-		Name:        "word_count",
-		Description: "Counts words, lines and characters in a piece of text.",
-		InputSchema: map[string]any{
-			"type":       "object",
-			"properties": map[string]any{"text": map[string]any{"type": "string", "description": "Text to count"}},
-			"required":   []string{"text"},
-		},
-		run: func(args map[string]any) (string, bool) {
-			text, ok := args["text"].(string)
-			if !ok {
-				return "text must be a string", true
-			}
-			lines := 0
-			if text != "" {
-				lines = strings.Count(text, "\n") + 1
-				if strings.HasSuffix(text, "\n") {
-					lines--
-				}
-			}
-			return fmt.Sprintf("words: %d, lines: %d, characters: %d",
-				len(strings.Fields(text)), lines, utf8.RuneCountInString(text)), false
-		},
-	},
-	{
-		Name:        "go_test",
-		Description: "Runs `go test ./...` in a directory (60s timeout) and returns the output.",
-		InputSchema: map[string]any{
-			"type":       "object",
-			"properties": map[string]any{"dir": map[string]any{"type": "string", "description": "Directory containing the Go module or package"}},
-			"required":   []string{"dir"},
-		},
-		run: func(args map[string]any) (string, bool) {
-			dir, ok := args["dir"].(string)
-			if !ok || dir == "" {
-				return "dir must be a non-empty string", true
-			}
-			return goTest(dir, 60*time.Second)
-		},
-	},
+// text wraps a string as a tool result. isError marks a tool-level failure:
+// the call worked, but the tool reports a problem the model should see.
+func text(s string, isError bool) *mcp.CallToolResult {
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: s}}, IsError: isError}
 }
 
-// goTest runs the tests and reports failure (or a timeout) as a tool error.
-func goTest(dir string, timeout time.Duration) (string, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "test", "./...")
-	cmd.Dir = dir
-	cmd.WaitDelay = 2 * time.Second
-	out, err := cmd.CombinedOutput()
-	text := string(out)
-	if len(text) > 10*1024 {
-		text = text[:10*1024] + "\n[truncated]"
-	}
-	if ctx.Err() == context.DeadlineExceeded {
-		return text + "\n[timed out after " + timeout.String() + "]", true
-	}
-	if err != nil {
-		return text + "\n[" + err.Error() + "]", true
-	}
-	return text, false
+// Each handler returns (result, structured output, error). We use the output
+// type `any` and return nil, so no output schema is generated. A returned Go
+// error is also reported to the client as a tool error.
+
+func getTime(ctx context.Context, req *mcp.CallToolRequest, _ noInput) (*mcp.CallToolResult, any, error) {
+	return text(time.Now().Format(time.RFC1123), false), nil, nil
 }
 
-// handle processes one incoming line and returns the response to send,
-// or nil for notifications. It never panics on bad input.
-func handle(line []byte) *response {
-	var req request
-	if err := json.Unmarshal(line, &req); err != nil {
-		return &response{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{errParse, "parse error: " + err.Error()}}
-	}
-	isNotification := len(req.ID) == 0
-	result, rerr := dispatch(req)
-	if isNotification {
-		return nil // never answer notifications, even on error
-	}
-	resp := &response{JSONRPC: "2.0", ID: req.ID}
-	if rerr != nil {
-		resp.Error = rerr
-	} else {
-		resp.Result = result
-	}
-	return resp
-}
-
-// dispatch routes a request by method name.
-func dispatch(req request) (any, *rpcError) {
-	if req.JSONRPC != "2.0" || req.Method == "" {
-		return nil, &rpcError{errInvalidRequest, "invalid request"}
-	}
-	switch req.Method {
-	case "initialize":
-		// Tell the client who we are and what we support (only tools).
-		return map[string]any{
-			"protocolVersion": protocolVersion,
-			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "mini-mcp", "version": "0.1.0"},
-		}, nil
-	case "notifications/initialized", "notifications/cancelled":
-		return nil, nil // the client is ready / gave up on a request; nothing to do
-	case "ping":
-		return map[string]any{}, nil
-	case "tools/list":
-		return map[string]any{"tools": tools}, nil
-	case "tools/call":
-		return callTool(req.Params)
-	}
-	return nil, &rpcError{errMethodNotFound, "method not found: " + req.Method}
-}
-
-// callTool runs a tool. A tool that fails still returns a normal result with
-// isError=true, so the model sees the message; JSON-RPC errors are for
-// protocol problems such as an unknown tool name.
-func callTool(params json.RawMessage) (any, *rpcError) {
-	var p struct {
-		Name      string         `json:"name"`
-		Arguments map[string]any `json:"arguments"`
-	}
-	if err := json.Unmarshal(params, &p); err != nil {
-		return nil, &rpcError{errInvalidParams, "bad params: " + err.Error()}
-	}
-	for _, t := range tools {
-		if t.Name == p.Name {
-			text, isErr := t.run(p.Arguments)
-			return map[string]any{
-				"content": []map[string]any{{"type": "text", "text": text}},
-				"isError": isErr,
-			}, nil
+func wordCount(ctx context.Context, req *mcp.CallToolRequest, in wordCountInput) (*mcp.CallToolResult, any, error) {
+	lines := 0
+	if in.Text != "" {
+		lines = strings.Count(in.Text, "\n") + 1
+		if strings.HasSuffix(in.Text, "\n") {
+			lines--
 		}
 	}
-	return nil, &rpcError{errInvalidParams, "unknown tool: " + p.Name}
+	return text(fmt.Sprintf("words: %d, lines: %d, characters: %d",
+		len(strings.Fields(in.Text)), lines, utf8.RuneCountInString(in.Text)), false), nil, nil
+}
+
+func goTest(ctx context.Context, req *mcp.CallToolRequest, in goTestInput) (*mcp.CallToolResult, any, error) {
+	if in.Dir == "" {
+		return text("dir must not be empty", true), nil, nil
+	}
+	// The request context is cancelled if the client gives up; add our own timeout too.
+	const timeout = 60 * time.Second
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	goBin, err := lookPathGo()
+	if err != nil {
+		return text("go not found: "+err.Error(), true), nil, nil
+	}
+	cmd := exec.CommandContext(ctx, goBin, "test", "./...")
+	cmd.Dir = in.Dir
+	cmd.WaitDelay = 2 * time.Second
+	out, err := cmd.CombinedOutput()
+	s := string(out)
+	if len(s) > 10*1024 {
+		s = s[:10*1024] + "\n[truncated]"
+	}
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		return text(s+"\n[timed out after "+timeout.String()+"]", true), nil, nil
+	case err != nil:
+		return text(s+"\n["+err.Error()+"]", true), nil, nil
+	}
+	return text(s, false), nil, nil
+}
+
+// lookPathGo finds the go binary even when PATH is thin (Claude Code often
+// launches MCP servers with a minimal env). It tries PATH first, then common
+// install locations, then $GOROOT/bin.
+func lookPathGo() (string, error) {
+	if p, err := exec.LookPath("go"); err == nil {
+		return p, nil
+	}
+	candidates := []string{
+		"/opt/homebrew/bin/go", "/usr/local/go/bin/go", "/usr/local/bin/go",
+	}
+	if r := os.Getenv("GOROOT"); r != "" {
+		candidates = append(candidates, filepath.Join(r, "bin", "go"))
+	}
+	if h, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(h, "go", "bin", "go"), filepath.Join(h, "sdk", "go", "bin", "go"))
+	}
+	for _, c := range candidates {
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("go not in PATH or common locations")
 }
