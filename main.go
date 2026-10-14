@@ -19,6 +19,12 @@ var (
 	apiKey  = env("AGENT_API_KEY", os.Getenv("DEEPSEEK_API_KEY"))
 )
 
+// systemPrompt tells the model how to behave as a coding agent.
+const systemPrompt = `You are a coding agent working in the current directory.
+Work step by step: inspect files (ls, read_file), run the tests (go test ./...),
+make the smallest fix with write_file, then re-run the tests until they pass.
+Never guess file contents; read them first. Finish with a short summary of what you changed.`
+
 // maxSteps caps the loop so a confused model can't run forever.
 const maxSteps = 20
 
@@ -51,7 +57,8 @@ type Response struct {
 
 func call(msgs []Message) (*Response, error) {
 	body, _ := json.Marshal(map[string]any{
-		"model": model, "max_tokens": 1024, "tools": tools, "messages": msgs,
+		"model": model, "max_tokens": 4096, "system": systemPrompt,
+		"tools": tools, "messages": msgs,
 	})
 	req, _ := http.NewRequest("POST", baseURL+"/v1/messages", bytes.NewReader(body))
 	req.Header.Set("x-api-key", apiKey)

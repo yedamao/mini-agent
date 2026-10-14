@@ -14,3 +14,11 @@ Note: `run_shell` runs real commands on your machine; only use it in a directory
 Defaults to DeepSeek's Anthropic-compatible API using `$DEEPSEEK_API_KEY`.
 Override with `AGENT_BASE_URL`, `AGENT_MODEL`, `AGENT_API_KEY`
 (e.g. `AGENT_BASE_URL=https://api.anthropic.com AGENT_MODEL=claude-sonnet-4-5`).
+
+Day 5: a coding agent. `examples/buggy/` is a separate module with a failing test
+(an off-by-one bug). Let the agent fix it:
+
+    go build -o /tmp/mini-agent . && cd examples/buggy
+    /tmp/mini-agent "the tests in this directory fail; find and fix the bug, then confirm go test passes"
+
+See `examples/buggy/RUN.md` for a sample run. Afterwards, `git checkout examples/buggy` restores the bug.
