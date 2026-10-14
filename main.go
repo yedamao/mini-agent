@@ -1,5 +1,5 @@
 // Day 1: one model call with one tool (get_time), no frameworks.
-// Run: ANTHROPIC_API_KEY=... go run . "what time is it?"
+// Run: go run . "what time is it?"   (uses $DEEPSEEK_API_KEY by default)
 package main
 
 import (
@@ -13,7 +13,19 @@ import (
 	"time"
 )
 
-const model = "claude-sonnet-4-5"
+// Works with Anthropic or any Anthropic-compatible API (e.g. DeepSeek).
+var (
+	baseURL = env("AGENT_BASE_URL", "https://api.deepseek.com/anthropic")
+	model   = env("AGENT_MODEL", "deepseek-chat")
+	apiKey  = env("AGENT_API_KEY", os.Getenv("DEEPSEEK_API_KEY"))
+)
+
+func env(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
 
 type Message struct {
 	Role    string `json:"role"`
@@ -53,8 +65,8 @@ func call(msgs []Message) (*Response, error) {
 	body, _ := json.Marshal(map[string]any{
 		"model": model, "max_tokens": 1024, "tools": tools, "messages": msgs,
 	})
-	req, _ := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
-	req.Header.Set("x-api-key", os.Getenv("ANTHROPIC_API_KEY"))
+	req, _ := http.NewRequest("POST", baseURL+"/v1/messages", bytes.NewReader(body))
+	req.Header.Set("x-api-key", apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("content-type", "application/json")
 	res, err := http.DefaultClient.Do(req)
