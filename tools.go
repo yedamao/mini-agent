@@ -65,6 +65,9 @@ func runTool(name string, raw json.RawMessage) string {
 			return "error: bad input: " + err.Error()
 		}
 	}
+	if strings.HasPrefix(name, mcpPrefix) && mcp != nil {
+		return callMCPTool(name, raw) // Day 8: tools from an MCP server
+	}
 	switch name {
 	case "get_time":
 		return time.Now().Format(time.RFC1123)

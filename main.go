@@ -134,6 +134,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "no API key: set AGENT_API_KEY or DEEPSEEK_API_KEY")
 		os.Exit(1)
 	}
+	if path := os.Getenv("AGENT_MCP"); path != "" {
+		if err := startMCP(path); err != nil {
+			fmt.Fprintln(os.Stderr, "mcp:", err)
+			os.Exit(1)
+		}
+		defer stopMCP()
+	}
 	args := os.Args[1:]
 	if len(args) > 0 && args[0] == "-i" {
 		repl()
@@ -144,11 +151,15 @@ func main() {
 		prompt = strings.Join(args, " ")
 	}
 	_, err := runAgent([]Message{{Role: "user", Content: prompt}}, prompt)
-	if errors.Is(err, errStepLimit) {
-		os.Exit(2)
-	} else if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+	if err != nil {
+		code := 1
+		if errors.Is(err, errStepLimit) {
+			code = 2
+		} else {
+			fmt.Fprintln(os.Stderr, "error:", err)
+		}
+		stopMCP() // os.Exit skips deferred calls
+		os.Exit(code)
 	}
 }
 
