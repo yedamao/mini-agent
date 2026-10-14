@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // maxOutput caps tool output so one huge result can't flood the model's context.
@@ -72,6 +75,12 @@ func runTool(name string, raw json.RawMessage) string {
 		}
 		return truncate(string(data))
 	case "write_file":
+		if in.Path == "" {
+			return "error: path is required"
+		}
+		if err := os.MkdirAll(filepath.Dir(in.Path), 0o755); err != nil {
+			return "error: " + err.Error()
+		}
 		if err := os.WriteFile(in.Path, []byte(in.Content), 0o644); err != nil {
 			return "error: " + err.Error()
 		}
@@ -86,7 +95,14 @@ func runTool(name string, raw json.RawMessage) string {
 func runShell(command string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "sh", "-c", command).CombinedOutput()
+	if strings.TrimSpace(command) == "" {
+		return "error: command is required"
+	}
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	// Without WaitDelay, a background child holding the output pipe open
+	// would make CombinedOutput hang past the timeout.
+	cmd.WaitDelay = 2 * time.Second
+	out, err := cmd.CombinedOutput()
 	result := string(out)
 	if ctx.Err() == context.DeadlineExceeded {
 		result += "\n[timed out after 30s]"
@@ -100,11 +116,17 @@ func runShell(command string) string {
 }
 
 // truncate keeps output under maxOutput bytes.
-func truncate(s string) string {
-	if len(s) <= maxOutput {
+func truncate(s string) string { return truncateN(s, maxOutput) }
+
+// truncateN cuts s to at most n bytes without splitting a UTF-8 character.
+func truncateN(s string, n int) string {
+	if len(s) <= n {
 		return s
 	}
-	return s[:maxOutput] + "\n[truncated]"
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "\n[truncated]"
 }
 
 // preview shortens text to one line of at most n characters, for logs.

@@ -24,7 +24,8 @@ Day 5: a coding agent. `examples/buggy/` is a separate module with a failing tes
 See `examples/buggy/RUN.md` for a sample run. Afterwards, `git checkout examples/buggy` restores the bug.
 
 Day 6-7: context management (`context.go`).
-- Every step logs token usage to stderr: `[step 3] tokens in=… out=… | total in=… out=…`.
+- Every step logs token usage to stderr: `[step 3] tokens prompt=… (cached …) out=… | total in=… out=…`.
+  The prompt size includes cached tokens, which the API reports separately from `input_tokens`.
 - Tool results older than 6 messages are replaced with short stubs (cheap).
 - When a prompt goes over `AGENT_CONTEXT_BUDGET` input tokens (default 50000), the
   middle of the history is replaced by a model-written summary. The first task and the
@@ -34,3 +35,13 @@ Day 6-7: context management (`context.go`).
 Watch compaction happen with a tiny budget:
 
     AGENT_CONTEXT_BUDGET=3000 go run . "read all the .go files here and explain the architecture"
+
+Day 6-7 fixes:
+- Stubs and summaries keep a list of files already read (path + digest), so the model
+  doesn't re-read them; compaction waits at least 3 steps between runs so a tiny budget
+  can't thrash. The summarizer sees the untrimmed tool output and is told not to invent facts.
+- The system prompt limits the agent to the task: it edits files only when asked and
+  answers only from files it actually read.
+- `-i` mode: Ctrl-D/`exit` quits, errors don't end the session, compaction works between prompts.
+- Unit tests: `go test .` (context helpers; no API calls).
+- Sample run with `AGENT_CONTEXT_BUDGET=3000`: `examples/RUN-context.md`.
