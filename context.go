@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -133,7 +134,7 @@ func cutIndex(msgs []Message) int {
 }
 
 // compact replaces messages[1:cut] with a model-written summary.
-func compact(msgs []Message, request string) ([]Message, error) {
+func compact(ctx context.Context, msgs []Message, request string) ([]Message, error) {
 	cut := cutIndex(msgs)
 	if cut < 0 {
 		return msgs, nil
@@ -166,7 +167,7 @@ func compact(msgs []Message, request string) ([]Message, error) {
 	// Wrap the transcript so the model summarizes it instead of continuing it.
 	ask := "<transcript>\n" + transcript + "\n</transcript>\n\nWrite the summary of the transcript above now. " +
 		"Do not continue the conversation, do not call tools, do not add anything not in the transcript."
-	r, err := callModel(summaryPrompt, []Message{{Role: "user", Content: []Block{{Type: "text", Text: ask}}}}, false)
+	r, err := callModel(ctx, summaryPrompt, []Message{{Role: "user", Content: []Block{{Type: "text", Text: ask}}}}, false)
 	if err != nil {
 		return msgs, err
 	}
@@ -242,8 +243,8 @@ func textOf(bs []Block) string {
 var totalIn, totalOut int
 
 func logUsage(label string, u Usage) {
-	totalIn += u.promptTokens()
+	totalIn += u.PromptTokens()
 	totalOut += u.OutputTokens
 	fmt.Fprintf(os.Stderr, "[%s] tokens prompt=%d (cached %d) out=%d | total in=%d out=%d\n",
-		label, u.promptTokens(), u.CacheRead, u.OutputTokens, totalIn, totalOut)
+		label, u.PromptTokens(), u.CacheRead, u.OutputTokens, totalIn, totalOut)
 }

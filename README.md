@@ -69,3 +69,37 @@ Day 8: an MCP server, and the agent as an MCP client.
         '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
         '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"word_count","arguments":{"text":"hi there"}}}' \
         | go run ./examples/mcp-from-scratch
+
+Day 10: resilience (`internal/llm`).
+- Each model call gets its own timeout: `AGENT_CALL_TIMEOUT` seconds, default 120.
+- Retries: 429, 5xx (including 529 "overloaded"), network errors and per-call timeouts
+  are retried up to `AGENT_MAX_ATTEMPTS` (default 5) with exponential backoff and jitter
+  (about 1s, 2s, 4s...). A `Retry-After` header is honored. Other 4xx (bad key, bad
+  request) fail at once, since retrying can't fix them.
+- Ctrl-C cancels cleanly (`signal.NotifyContext`): the in-flight request or shell
+  command is aborted and the agent exits with code 130.
+- Tests: `go test ./internal/llm` uses an `httptest` server that fails and then succeeds.
+
+Day 11: the agent loop as a Temporal workflow (`cmd/temporal-agent`, `go.temporal.io/sdk`).
+
+Why Temporal: a plain loop loses everything if the process dies halfway through a
+20-step task. In Temporal, each model call and tool call is an **activity** whose result
+is saved in the workflow's **history**. If a worker crashes, another worker replays the
+history (without re-running finished steps) and carries on. Each activity has its own
+timeout and retry policy, and the UI at http://localhost:8233 shows every step, input,
+output and retry.
+
+    temporal server start-dev                         # local dev server + UI on :8233
+    go run ./cmd/temporal-agent worker                # needs DEEPSEEK_API_KEY in its env
+    go run ./cmd/temporal-agent start -wait "read main.go and summarize it"
+
+Rules this follows:
+- Workflow code is deterministic: no `time.Now`, randomness or I/O. Those all happen in
+  activities, so a replay makes the same decisions.
+- The API key is never in workflow input or history. Activities read it from the
+  worker's environment.
+- Activities send heartbeats, so a dead worker is noticed in ~20s, not after the full timeout.
+- 4xx errors are marked non-retryable; Retry-After becomes Temporal's `NextRetryDelay`.
+
+`examples/RUN-temporal.md` shows a durability demo: the worker is killed in the middle of
+a run, restarted, and the workflow completes.

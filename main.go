@@ -1,19 +1,21 @@
 // mini-agent: an agent loop with file and shell tools (tools.go) and
 // context management (context.go), no frameworks.
 // Run: go run . "what time is it?"   or   go run . -i   for an interactive session.
+// Model calls have a per-call timeout and retries (internal/llm); Ctrl-C cancels.
 package main
 
 import (
 	"bufio"
-	"bytes"
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/yedamao/mini-agent/internal/llm"
 )
 
 // Works with Anthropic or any Anthropic-compatible API (e.g. DeepSeek).
@@ -41,8 +43,6 @@ const maxSteps = 20
 // errStepLimit is returned when the loop hits maxSteps without a final answer.
 var errStepLimit = errors.New("step limit reached")
 
-var httpClient = &http.Client{Timeout: 3 * time.Minute}
-
 func env(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
@@ -50,32 +50,23 @@ func env(k, def string) string {
 	return def
 }
 
-type Message struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"` // a string or []Block
-}
+// The API types live in internal/llm (shared with the Temporal worker).
+type (
+	Message  = llm.Message
+	Block    = llm.Block
+	Usage    = llm.Usage
+	Response = llm.Response
+)
 
-type Block struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-	Content   string          `json:"content,omitempty"`
+// client calls the model with a per-call timeout and retries (Day 10).
+var client = &llm.Client{
+	BaseURL:     baseURL,
+	Model:       model,
+	APIKey:      apiKey,
+	CallTimeout: time.Duration(envInt("AGENT_CALL_TIMEOUT", 120)) * time.Second,
+	MaxAttempts: envInt("AGENT_MAX_ATTEMPTS", 5),
+	Logf:        func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
 }
-
-type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	// Prompt-cache hits are reported separately and NOT included in
-	// input_tokens, so the real prompt size is the sum (see promptTokens).
-	CacheRead     int `json:"cache_read_input_tokens"`
-	CacheCreation int `json:"cache_creation_input_tokens"`
-}
-
-// promptTokens is the full size of the prompt we sent, cached or not.
-func (u Usage) promptTokens() int { return u.InputTokens + u.CacheRead + u.CacheCreation }
 
 // lastPrompt is the prompt size of the most recent call; it decides compaction.
 var lastPrompt int
@@ -83,53 +74,20 @@ var lastPrompt int
 // sinceCompact counts steps since the last compaction (starts high so the first can happen).
 var sinceCompact = minGap
 
-type Response struct {
-	Content    []Block `json:"content"`
-	StopReason string  `json:"stop_reason"`
-	Usage      Usage   `json:"usage"`
-}
-
 // callModel sends one request. withTools=false is used for summarization.
-func callModel(system string, msgs []Message, withTools bool) (*Response, error) {
-	req := map[string]any{"model": model, "max_tokens": 4096, "system": system, "messages": msgs}
+func callModel(ctx context.Context, system string, msgs []Message, withTools bool) (*Response, error) {
+	req := llm.Request{System: system, Messages: msgs}
 	if withTools {
-		req["tools"] = tools
+		req.Tools = toolDefs
 	}
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("encode request: %w", err)
-	}
-	hreq, err := http.NewRequest("POST", baseURL+"/v1/messages", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	hreq.Header.Set("x-api-key", apiKey)
-	hreq.Header.Set("anthropic-version", "2023-06-01")
-	hreq.Header.Set("content-type", "application/json")
-	res, err := httpClient.Do(hreq)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	raw, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-	if res.StatusCode != http.StatusOK {
-		// Error bodies may be HTML or huge; show a short preview only.
-		return nil, fmt.Errorf("api %d: %s", res.StatusCode, preview(string(raw), 300))
-	}
-	var r Response
-	if err := json.Unmarshal(raw, &r); err != nil {
-		return nil, fmt.Errorf("decode response: %w (body: %s)", err, preview(string(raw), 200))
-	}
-	if len(r.Content) == 0 {
-		return nil, fmt.Errorf("empty response (stop_reason %q)", r.StopReason)
-	}
-	return &r, nil
+	return client.Call(ctx, req)
 }
 
 func main() {
+	// Ctrl-C (or SIGTERM) cancels ctx: the in-flight model call or shell
+	// command is aborted, retries stop, and we exit cleanly.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	if apiKey == "" {
 		fmt.Fprintln(os.Stderr, "no API key: set AGENT_API_KEY or DEEPSEEK_API_KEY")
 		os.Exit(1)
@@ -143,18 +101,21 @@ func main() {
 	}
 	args := os.Args[1:]
 	if len(args) > 0 && args[0] == "-i" {
-		repl()
+		repl(ctx)
 		return
 	}
 	prompt := "What time is it right now?"
 	if len(args) > 0 {
 		prompt = strings.Join(args, " ")
 	}
-	_, err := runAgent([]Message{{Role: "user", Content: prompt}}, prompt)
+	_, err := runAgent(ctx, []Message{{Role: "user", Content: prompt}}, prompt)
 	if err != nil {
 		code := 1
 		if errors.Is(err, errStepLimit) {
 			code = 2
+		} else if ctx.Err() != nil {
+			fmt.Fprintln(os.Stderr, "interrupted")
+			code = 130
 		} else {
 			fmt.Fprintln(os.Stderr, "error:", err)
 		}
@@ -164,7 +125,7 @@ func main() {
 }
 
 // repl keeps one conversation going across prompts. Type "exit" or press Ctrl-D to quit.
-func repl() {
+func repl(ctx context.Context) {
 	var msgs []Message
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 1024*1024), 1024*1024) // allow long pasted prompts
@@ -183,7 +144,11 @@ func repl() {
 		}
 		msgs = addUserText(msgs, line)
 		var err error
-		msgs, err = runAgent(msgs, line)
+		msgs, err = runAgent(ctx, msgs, line)
+		if ctx.Err() != nil {
+			fmt.Fprintln(os.Stderr, "interrupted")
+			return
+		}
 		if err != nil && !errors.Is(err, errStepLimit) {
 			// Keep the session alive; the history up to the failure is kept.
 			fmt.Fprintln(os.Stderr, "error:", err)
@@ -205,14 +170,14 @@ func addUserText(msgs []Message, text string) []Message {
 // runAgent is the agent loop: call the model, run any tools it asks for,
 // send results back, and keep the context small. request is the user's
 // current prompt, which compaction always keeps. It returns the updated history.
-func runAgent(msgs []Message, request string) ([]Message, error) {
+func runAgent(ctx context.Context, msgs []Message, request string) ([]Message, error) {
 	for step := 1; step <= maxSteps; step++ {
 		// If the last prompt was over budget, summarize the middle before calling.
 		// Checking here (not after the reply) also covers new prompts in -i mode.
 		sinceCompact++
 		if lastPrompt > contextBudget && sinceCompact >= minGap {
 			before := len(msgs)
-			compacted, err := compact(msgs, request)
+			compacted, err := compact(ctx, msgs, request)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "[context] compaction failed:", err)
 			} else if len(compacted) < before {
@@ -222,11 +187,11 @@ func runAgent(msgs []Message, request string) ([]Message, error) {
 				sinceCompact = 0
 			}
 		}
-		r, err := callModel(systemPrompt, msgs, true)
+		r, err := callModel(ctx, systemPrompt, msgs, true)
 		if err != nil {
 			return msgs, err
 		}
-		lastPrompt = r.Usage.promptTokens()
+		lastPrompt = r.Usage.PromptTokens()
 		logUsage(fmt.Sprintf("step %d", step), r.Usage)
 		msgs = append(msgs, Message{Role: "assistant", Content: r.Content})
 		var results []Block
@@ -235,7 +200,7 @@ func runAgent(msgs []Message, request string) ([]Message, error) {
 			case "text":
 				fmt.Println(b.Text)
 			case "tool_use":
-				out := runTool(b.Name, b.Input)
+				out := runTool(ctx, b.Name, b.Input)
 				remember(b, out)
 				// Log to stderr so stdout stays just the model's answer.
 				fmt.Fprintf(os.Stderr, "[step %d] %s %s -> %s\n",

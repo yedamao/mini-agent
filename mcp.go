@@ -78,7 +78,7 @@ func startMCP(path string) error {
 	}
 	var names []string
 	for _, t := range list.Tools {
-		tools = append(tools, map[string]any{
+		toolDefs = append(toolDefs, map[string]any{
 			"name":         mcpPrefix + t.Name,
 			"description":  "[MCP " + initRes.ServerInfo.Name + "] " + t.Description,
 			"input_schema": t.InputSchema,
