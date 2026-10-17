@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -37,7 +36,9 @@ func skillRoots() []skills.Root {
 func setupSkills() {
 	found, warnings := skills.Discover(skillRoots())
 	for _, w := range warnings {
-		fmt.Fprintf(os.Stderr, "[skills] skipped: %v\n", w)
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "[skills] skipped: %v\n", w)
+		}
 	}
 	if len(found) == 0 {
 		return
@@ -59,7 +60,9 @@ func setupSkills() {
 			"required": []string{"name"},
 		},
 	})
-	fmt.Fprintf(os.Stderr, "[skills] available: %s\n", strings.Join(names, ", "))
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "[skills] available: %s\n", strings.Join(names, ", "))
+	}
 }
 
 // useSkill is the use_skill tool: it returns the SKILL.md body and folder.
@@ -79,7 +82,9 @@ func useSkill(raw json.RawMessage) string {
 		return fmt.Sprintf("error: no skill %q; available: %s", in.Name, strings.Join(names, ", "))
 	}
 	loadedSkills[s.Name] = true
-	fmt.Fprintf(os.Stderr, "[skills] loaded %s (%s scope, %s)\n", s.Name, s.Scope, s.Dir)
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "[skills] loaded %s (%s scope, %s)\n", s.Name, s.Scope, s.Dir)
+	}
 	return truncate(s.Instructions())
 }
 
@@ -100,30 +105,47 @@ func loadedSkillsNote() string {
 
 // skillCommand implements `mini-agent skill ...`.
 func skillCommand(ctx context.Context, args []string, out io.Writer) error {
-	usage := errors.New(`usage: mini-agent skill add <path|git-url> [--project] [--force]
-       mini-agent skill list
-       mini-agent skill show <name>
-       mini-agent skill remove <name> [--project]
-       mini-agent skill new <name> [--project]`)
-	if len(args) == 0 {
-		return usage
+	if len(args) == 0 || isHelp(args[0]) {
+		fmt.Fprint(out, skillUsage)
+		return errHelp
 	}
-	fs := flag.NewFlagSet("skill", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	sub, rest := args[0], args[1:]
+	fs := newFlagSet("skill")
+	var help bool
+	boolFlag(fs, &help, "h", "help", "show help")
 	project := fs.Bool("project", false, "use the project scope (./.mini-agent/skills) instead of the user scope")
 	force := fs.Bool("force", false, "replace an installed skill")
-	// Allow flags before or after the positional arguments.
-	var pos []string
-	rest := args[1:]
-	for len(rest) > 0 {
-		if err := fs.Parse(rest); err != nil {
-			return fmt.Errorf("%v\n%w", err, usage)
+
+	var pos, flagArgs []string
+	for i := 0; i < len(rest); {
+		a := rest[i]
+		if a == "--" {
+			pos = append(pos, rest[i+1:]...)
+			break
 		}
-		rest = fs.Args()
-		if len(rest) > 0 {
-			pos, rest = append(pos, rest[0]), rest[1:]
+		if a == "-h" || a == "--help" || a == "-help" || a == "--project" || a == "-project" || a == "--force" || a == "-force" {
+			flagArgs = append(flagArgs, a)
+			i++
+			continue
 		}
+		if strings.HasPrefix(a, "-") {
+			return errExit{Msg: "flag provided but not defined: " + a + "\nSee -h for usage."}
+		}
+		pos = append(pos, a)
+		i++
 	}
+	if err := parseFlags(fs, flagArgs); err != nil {
+		if errors.Is(err, errHelp) || help {
+			fmt.Fprint(out, skillUsage)
+			return errHelp
+		}
+		return err
+	}
+	if help {
+		fmt.Fprint(out, skillUsage)
+		return errHelp
+	}
+	usage := errExit{Msg: "usage: mini-agent skill " + sub + " ...\nSee -h for details."}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -134,7 +156,7 @@ func skillCommand(ctx context.Context, args []string, out io.Writer) error {
 		root, scope = skills.ProjectDir(cwd), "project"
 	}
 
-	switch args[0] {
+	switch sub {
 	case "add":
 		if len(pos) != 1 {
 			return usage
@@ -193,7 +215,7 @@ func skillCommand(ctx context.Context, args []string, out io.Writer) error {
 		fmt.Fprintf(out, "Created %s/SKILL.md; edit the description and steps.\n", dir)
 		return nil
 	}
-	return usage
+	return errExit{Msg: fmt.Sprintf("unknown skill command %q\nSee -h for usage.", sub)}
 }
 
 func firstLine(s string, n int) string {

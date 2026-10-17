@@ -192,3 +192,21 @@ allowed-tools: Bash Read       # optional, experimental: shown but not enforced
 - **Example:** `examples/skills/go-test-fixer` is a workflow for fixing failing Go tests, with
   `scripts/failing-tests.sh`. Install it, then run `mini-agent "fix the failing tests"` in
   `examples/buggy`. The log shows `[skills] loaded go-test-fixer`.
+
+## CLI
+
+```
+mini-agent -h                 # usage, flags, env vars, examples
+mini-agent "what time is it?" # one-shot task (needs AGENT_API_KEY or DEEPSEEK_API_KEY)
+mini-agent -i                 # interactive REPL
+mini-agent -q -C examples/buggy "fix the failing tests"
+mini-agent -- "-n means dry-run"   # prompt that starts with a dash
+
+mini-agent mcp|m ...          # manage MCP servers (no API key)
+mini-agent skill|s ...        # manage Agent Skills (no API key)
+mini-agent doctor             # one-line setup check (key presence, mcp.json, skills)
+mini-agent -v                 # version
+```
+
+Global flags: `-h`/`--help`, `-v`/`--version`, `-i`, `-q`/`--quiet`, `-C <dir>`, `--`.
+Subcommands accept `-h` too. Unknown flags print a short error and point to `-h`.

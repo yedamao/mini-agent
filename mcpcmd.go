@@ -3,7 +3,7 @@ package main
 // `mini-agent mcp ...` manages the MCP config, like `claude mcp`:
 //
 //	mini-agent mcp add [-t http|sse|stdio] [-H "Name: value"]... [-e KEY=value]... <name> <url | command [args...]>
-//	mini-agent mcp list      # shows each server and checks that it connects
+//	mini-agent mcp list
 //	mini-agent mcp get <name>
 //	mini-agent mcp remove <name>
 
@@ -11,7 +11,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"strings"
@@ -28,8 +27,9 @@ func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
 func mcpCommand(ctx context.Context, args []string, out io.Writer) error {
 	path := mcpconf.DefaultPath()
-	if len(args) == 0 {
-		return errors.New("usage: mini-agent mcp add|list|get|remove ... (config: " + path + ")")
+	if len(args) == 0 || isHelp(args[0]) {
+		fmt.Fprintf(out, mcpUsage, path)
+		return errHelp
 	}
 	cfg, err := mcpconf.Load(path)
 	if err != nil {
@@ -38,6 +38,10 @@ func mcpCommand(ctx context.Context, args []string, out io.Writer) error {
 	switch args[0] {
 	case "add":
 		name, s, err := parseAdd(args[1:])
+		if errors.Is(err, errHelp) {
+			fmt.Fprintf(out, mcpUsage, path)
+			return errHelp
+		}
 		if err != nil {
 			return err
 		}
@@ -51,8 +55,12 @@ func mcpCommand(ctx context.Context, args []string, out io.Writer) error {
 		fmt.Fprintf(out, "Added %s MCP server %s to %s\n", s.Transport(), name, path)
 		return nil
 	case "remove", "rm":
+		if len(args) > 1 && isHelp(args[1]) {
+			fmt.Fprintln(out, "Usage: mini-agent mcp remove <name>\nRemove a server from the MCP config.")
+			return errHelp
+		}
 		if len(args) != 2 {
-			return errors.New("usage: mini-agent mcp remove <name>")
+			return errExit{Msg: "usage: mini-agent mcp remove <name>\nSee -h for details."}
 		}
 		if _, ok := cfg.MCPServers[args[1]]; !ok {
 			return fmt.Errorf("no server named %q", args[1])
@@ -64,17 +72,25 @@ func mcpCommand(ctx context.Context, args []string, out io.Writer) error {
 		fmt.Fprintf(out, "Removed %s from %s\n", args[1], path)
 		return nil
 	case "get":
+		if len(args) > 1 && isHelp(args[1]) {
+			fmt.Fprintln(out, "Usage: mini-agent mcp get <name>\nPrint one server's config (secrets stay as ${VAR}).")
+			return errHelp
+		}
 		if len(args) != 2 {
-			return errors.New("usage: mini-agent mcp get <name>")
+			return errExit{Msg: "usage: mini-agent mcp get <name>\nSee -h for details."}
 		}
 		s, ok := cfg.MCPServers[args[1]]
 		if !ok {
 			return fmt.Errorf("no server named %q", args[1])
 		}
-		b, _ := json.MarshalIndent(s, "", "  ") // unexpanded: ${VARS} stay as written
+		b, _ := json.MarshalIndent(s, "", "  ")
 		fmt.Fprintf(out, "%s:\n%s\n", args[1], b)
 		return nil
 	case "list", "ls":
+		if len(args) > 1 && isHelp(args[1]) {
+			fmt.Fprintln(out, "Usage: mini-agent mcp list\nConnect to each configured server and show its status.")
+			return errHelp
+		}
 		if len(cfg.MCPServers) == 0 {
 			fmt.Fprintf(out, "No MCP servers in %s\n", path)
 			return nil
@@ -93,15 +109,20 @@ func mcpCommand(ctx context.Context, args []string, out io.Writer) error {
 		}
 		return nil
 	}
-	return fmt.Errorf("unknown mcp command %q", args[0])
+	return errExit{Msg: fmt.Sprintf("unknown mcp command %q\nSee -h for usage.", args[0])}
+}
+
+func isHelp(s string) bool {
+	return s == "-h" || s == "--help" || s == "help"
 }
 
 // parseAdd turns `add` arguments into a server entry. A target starting with
 // http:// or https:// is remote (Streamable HTTP unless -t sse); anything else
 // is a local command with optional arguments.
 func parseAdd(args []string) (string, mcpconf.Server, error) {
-	fs := flag.NewFlagSet("mcp add", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs := newFlagSet("mcp add")
+	var help bool
+	boolFlag(fs, &help, "h", "help", "show help")
 	transport := fs.String("t", "", "transport: stdio, http or sse (default: from the target)")
 	fs.StringVar(transport, "transport", "", "same as -t")
 	var headers, envs multiFlag
@@ -109,14 +130,17 @@ func parseAdd(args []string) (string, mcpconf.Server, error) {
 	fs.Var(&headers, "header", "same as -H")
 	fs.Var(&envs, "e", "environment variable for stdio servers, KEY=value")
 	fs.Var(&envs, "env", "same as -e")
-	usage := errors.New(`usage: mini-agent mcp add [-t http|sse|stdio] [-H "K: V"] [-e K=V] <name> <url | command [args...]>`)
-	if err := fs.Parse(args); err != nil {
-		return "", mcpconf.Server{}, fmt.Errorf("%v\n%w", err, usage)
+	if err := parseFlags(fs, args); err != nil {
+		return "", mcpconf.Server{}, err
+	}
+	if help {
+		return "", mcpconf.Server{}, errHelp
 	}
 	rest := fs.Args()
 	if len(rest) > 0 && rest[0] == "--" {
 		rest = rest[1:]
 	}
+	usage := errExit{Msg: "usage: mini-agent mcp add [-t http|sse|stdio] [-H \"K: V\"] [-e K=V] <name> <url | command [args...]>\nSee -h for details."}
 	if len(rest) < 2 {
 		return "", mcpconf.Server{}, usage
 	}

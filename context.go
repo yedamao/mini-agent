@@ -173,7 +173,9 @@ func compact(ctx context.Context, msgs []Message, request string) ([]Message, er
 	}
 	logUsage("summary", r.Usage)
 	summary := textOf(r.Content)
-	fmt.Fprintf(os.Stderr, "[context] summary: %s\n", preview(summary, 150))
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "[context] summary: %s\n", preview(summary, 150))
+	}
 	if list := filesReadList(); list != "" {
 		summary += "\n\nFiles already read (re-read only if you need exact contents):\n" + list
 	}
@@ -246,6 +248,9 @@ var totalIn, totalOut int
 func logUsage(label string, u Usage) {
 	totalIn += u.PromptTokens()
 	totalOut += u.OutputTokens
+	if quiet {
+		return
+	}
 	fmt.Fprintf(os.Stderr, "[%s] tokens prompt=%d (cached %d) out=%d | total in=%d out=%d\n",
 		label, u.PromptTokens(), u.CacheRead, u.OutputTokens, totalIn, totalOut)
 }

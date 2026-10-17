@@ -69,7 +69,9 @@ func startMCP(ctx context.Context, servers map[string]mcpconf.Server) {
 	for _, name := range sortedKeys(servers) {
 		session, tools, err := connectServer(ctx, name, servers[name], 30*time.Second)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[mcp] %s: %v (skipped)\n", name, err)
+			if !quiet {
+				fmt.Fprintf(os.Stderr, "[mcp] %s: %v (skipped)\n", name, err)
+			}
 			continue
 		}
 		hub.sessions[name] = session
@@ -84,7 +86,9 @@ func startMCP(ctx context.Context, servers map[string]mcpconf.Server) {
 			})
 			names = append(names, fullName)
 		}
-		fmt.Fprintf(os.Stderr, "[mcp] %s (%s): %s\n", name, servers[name].Transport(), strings.Join(names, ", "))
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "[mcp] %s (%s): %s\n", name, servers[name].Transport(), strings.Join(names, ", "))
+		}
 	}
 }
 

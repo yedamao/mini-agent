@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -65,7 +66,11 @@ var client = &llm.Client{
 	APIKey:      apiKey,
 	CallTimeout: time.Duration(envInt("AGENT_CALL_TIMEOUT", 120)) * time.Second,
 	MaxAttempts: envInt("AGENT_MAX_ATTEMPTS", 5),
-	Logf:        func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
+	Logf: func(f string, a ...any) {
+		if !quiet {
+			fmt.Fprintf(os.Stderr, f+"\n", a...)
+		}
+	},
 }
 
 // lastPrompt is the prompt size of the most recent call; it decides compaction.
@@ -88,40 +93,88 @@ func main() {
 	// command is aborted, retries stop, and we exit cleanly.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	args := os.Args[1:]
-	// `mini-agent mcp ...` and `mini-agent skill ...` manage config; no API key needed.
-	if len(args) > 0 && (args[0] == "mcp" || args[0] == "skill" || args[0] == "skills") {
-		cmd := mcpCommand
-		if args[0] != "mcp" {
-			cmd = skillCommand
+	if err := run(ctx, os.Args[1:]); err != nil {
+		if errors.Is(err, errHelp) {
+			os.Exit(0)
 		}
-		if err := cmd(ctx, args[1:], os.Stdout); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(exitCode(err))
 	}
+}
+
+// run is the CLI entrypoint (testable). Subcommands that need no API key
+// return before the key is checked.
+func run(ctx context.Context, args []string) error {
+	opts, err := parseRoot(args)
+	if err != nil {
+		if errors.Is(err, errHelp) {
+			fmt.Fprint(os.Stdout, rootUsage)
+			return errHelp
+		}
+		return err
+	}
+	if opts.Version {
+		fmt.Printf("mini-agent %s (%s %s/%s)\n", version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+		return nil
+	}
+	if opts.Dir != "" {
+		if err := os.Chdir(opts.Dir); err != nil {
+			return errExit{Msg: "-C: " + err.Error()}
+		}
+	}
+	quiet = opts.Quiet
+	args = opts.Args
+
+	// No-args and explicit help: show usage (not a confusing "no API key").
+	if len(args) == 0 && !opts.Interactive {
+		fmt.Fprint(os.Stdout, rootUsage)
+		return errHelp
+	}
+
+	if len(args) > 0 {
+		switch args[0] {
+		case "mcp", "m":
+			err := mcpCommand(ctx, args[1:], os.Stdout)
+			if errors.Is(err, errHelp) {
+				return errHelp
+			}
+			return err
+		case "skill", "skills", "s":
+			err := skillCommand(ctx, args[1:], os.Stdout)
+			if errors.Is(err, errHelp) {
+				return errHelp
+			}
+			return err
+		case "doctor":
+			return doctor(os.Stdout)
+		case "version":
+			fmt.Printf("mini-agent %s (%s %s/%s)\n", version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+			return nil
+		case "help":
+			fmt.Fprint(os.Stdout, rootUsage)
+			return errHelp
+		}
+	}
+
+	// Re-read the key at run time so tests (and a late export) take effect.
+	apiKey = env("AGENT_API_KEY", os.Getenv("DEEPSEEK_API_KEY"))
+	client.APIKey = apiKey
 	if apiKey == "" {
-		fmt.Fprintln(os.Stderr, "no API key: set AGENT_API_KEY or DEEPSEEK_API_KEY")
-		os.Exit(1)
+		return errExit{Msg: "no API key: set AGENT_API_KEY or DEEPSEEK_API_KEY\nSee -h for usage."}
 	}
-	// Connect to the configured MCP servers (local and remote).
 	servers, err := mcpServers()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "mcp config:", err)
-		os.Exit(1)
+		return fmt.Errorf("mcp config: %w", err)
 	}
 	startMCP(ctx, servers)
 	defer stopMCP()
 	setupSkills()
-	if len(args) > 0 && args[0] == "-i" {
+
+	if opts.Interactive {
 		repl(ctx)
-		return
+		return nil
 	}
-	prompt := "What time is it right now?"
-	if len(args) > 0 {
-		prompt = strings.Join(args, " ")
-	}
+	prompt := strings.Join(args, " ")
 	_, err = runAgent(ctx, []Message{{Role: "user", Content: prompt}}, prompt)
 	if err != nil {
 		code := 1
@@ -131,11 +184,12 @@ func main() {
 			fmt.Fprintln(os.Stderr, "interrupted")
 			code = 130
 		} else {
-			fmt.Fprintln(os.Stderr, "error:", err)
+			return err
 		}
-		stopMCP() // os.Exit skips deferred calls
+		stopMCP()
 		os.Exit(code)
 	}
+	return nil
 }
 
 // repl keeps one conversation going across prompts. Type "exit" or press Ctrl-D to quit.
@@ -193,10 +247,14 @@ func runAgent(ctx context.Context, msgs []Message, request string) ([]Message, e
 			before := len(msgs)
 			compacted, err := compact(ctx, msgs, request)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "[context] compaction failed:", err)
+				if !quiet {
+					fmt.Fprintln(os.Stderr, "[context] compaction failed:", err)
+				}
 			} else if len(compacted) < before {
-				fmt.Fprintf(os.Stderr, "[context] prompt %d > budget %d: compacted %d -> %d messages\n",
-					lastPrompt, contextBudget, before, len(compacted))
+				if !quiet {
+					fmt.Fprintf(os.Stderr, "[context] prompt %d > budget %d: compacted %d -> %d messages\n",
+						lastPrompt, contextBudget, before, len(compacted))
+				}
 				msgs = compacted
 				sinceCompact = 0
 			}
@@ -217,8 +275,10 @@ func runAgent(ctx context.Context, msgs []Message, request string) ([]Message, e
 				out := runTool(ctx, b.Name, b.Input)
 				remember(b, out)
 				// Log to stderr so stdout stays just the model's answer.
-				fmt.Fprintf(os.Stderr, "[step %d] %s %s -> %s\n",
-					step, b.Name, preview(string(b.Input), 80), preview(out, 120))
+				if !quiet {
+					fmt.Fprintf(os.Stderr, "[step %d] %s %s -> %s\n",
+						step, b.Name, preview(string(b.Input), 80), preview(out, 120))
+				}
 				results = append(results, Block{Type: "tool_result", ToolUseID: b.ID, Content: out})
 			}
 		}
@@ -228,7 +288,7 @@ func runAgent(ctx context.Context, msgs []Message, request string) ([]Message, e
 		msgs = append(msgs, Message{Role: "user", Content: results})
 
 		// Cheap first: stub out old tool results.
-		if n := trimOldResults(msgs); n > 0 {
+		if n := trimOldResults(msgs); n > 0 && !quiet {
 			fmt.Fprintf(os.Stderr, "[context] trimmed %d old tool results\n", n)
 		}
 	}
