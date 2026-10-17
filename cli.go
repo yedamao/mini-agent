@@ -15,8 +15,9 @@ import (
 	"github.com/yedamao/mini-agent/internal/skills"
 )
 
-// version is replaced at build time with -ldflags "-X main.version=..." if wanted.
-var version = "0.3.0"
+// version is the release version shown by -v / version.
+// Override at build time: -ldflags "-X main.version=..."
+var version = "0.1.0"
 
 // quiet suppresses per-step tool and token logs (answers still go to stdout).
 var quiet bool

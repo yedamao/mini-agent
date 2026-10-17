@@ -1,4 +1,18 @@
-.env
+# binaries / local builds
 /mini-agent
+/bin/
+*.exe
+
+# secrets & local env
+.env
+.env.*
+
+# eval output
 evals/last-run.json
-bin/
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

@@ -1,257 +1,144 @@
 # mini-agent
 
-A from-scratch coding agent in Go, built over 14 days.
+A from-scratch coding agent in Go: tools, context compaction, MCP, Agent Skills,
+a streamed bubbletea TUI, and an eval harness.
 
-Day 1: `go run . "what time is it?"`
+**Version:** 0.1.0
 
-Day 3: tools `get_time`, `read_file`, `write_file`, `run_shell` (30s timeout,
-output capped at ~10KB), up to 20 loop steps. Each step is logged to stderr.
-Try: `go run . "create hello.txt containing hi, then read it back and list files with ls"`
+## Install
 
-Code: `main.go` (API call + loop), `tools.go` (tool definitions + implementations).
-Note: `run_shell` runs real commands on your machine; only use it in a directory you trust.
-
-Defaults to DeepSeek's Anthropic-compatible API using `$DEEPSEEK_API_KEY`.
-Override with `AGENT_BASE_URL`, `AGENT_MODEL`, `AGENT_API_KEY`
-(e.g. `AGENT_BASE_URL=https://api.anthropic.com AGENT_MODEL=claude-sonnet-4-5`).
-
-Day 5: a coding agent. `examples/buggy/` is a separate module with a failing test
-(an off-by-one bug). Let the agent fix it:
-
-    go build -o /tmp/mini-agent . && cd examples/buggy
-    /tmp/mini-agent "the tests in this directory fail; find and fix the bug, then confirm go test passes"
-
-See `examples/buggy/RUN.md` for a sample run. Afterwards, `git checkout examples/buggy` restores the bug.
-
-Day 6-7: context management (`context.go`).
-- Every step logs token usage to stderr: `[step 3] tokens prompt=… (cached …) out=… | total in=… out=…`.
-  The prompt size includes cached tokens, which the API reports separately from `input_tokens`.
-- Tool results older than 6 messages are replaced with short stubs (cheap).
-- When a prompt goes over `AGENT_CONTEXT_BUDGET` input tokens (default 50000), the
-  middle of the history is replaced by a model-written summary. The first task and the
-  last few turns stay, and a tool call is never separated from its result.
-- `go run . -i` starts a full-screen interactive TUI (streamed answers); non-TTY uses a plain prompt.
-
-Watch compaction happen with a tiny budget:
-
-    AGENT_CONTEXT_BUDGET=3000 go run . "read all the .go files here and explain the architecture"
-
-Day 6-7 fixes:
-- Stubs and summaries keep a list of files already read (path + digest), so the model
-  doesn't re-read them; compaction waits at least 3 steps between runs so a tiny budget
-  can't thrash. The summarizer sees the untrimmed tool output and is told not to invent facts.
-- The system prompt limits the agent to the task: it edits files only when asked and
-  answers only from files it actually read.
-- `-i` mode: Ctrl-D/`exit` quits, errors don't end the session, compaction works between prompts.
-- Unit tests: `go test .` (context helpers; no API calls).
-- Sample run with `AGENT_CONTEXT_BUDGET=3000`: `examples/RUN-context.md`.
-
-Day 8: an MCP server, and the agent as an MCP client.
-- `cmd/mcp-server` is the server you'd ship. It's built on the official SDK,
-  `github.com/modelcontextprotocol/go-sdk/mcp`: `mcp.NewServer`, `mcp.AddTool` with typed
-  input structs (the SDK generates the JSON Schema and validates arguments), and
-  `server.Run(ctx, &mcp.StdioTransport{})`. Tools: `get_time`, `word_count(text)`,
-  `go_test(dir)` (60s timeout). Tests use `mcp.NewInMemoryTransports` with an SDK client.
-- Build it and add it to Claude Code:
-
-      go build -o ~/.local/bin/mini-mcp ./cmd/mcp-server
-      claude mcp add --scope user mini-mcp -- ~/.local/bin/mini-mcp
-      claude mcp list
-
-- The agent is an MCP client too (official SDK). See "Remote MCP servers" below.
-- `examples/mcp-from-scratch` is the same server written with the standard library only.
-  It's for learning the protocol (newline-delimited JSON-RPC 2.0: `initialize`,
-  `notifications/initialized`, `tools/list`, `tools/call`), not for shipping. Talk to it by hand:
-
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"me","version":"0"}}}' \
-        '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-        '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"word_count","arguments":{"text":"hi there"}}}' \
-        | go run ./examples/mcp-from-scratch
-
-Day 10: resilience (`internal/llm`).
-- Each model call gets its own timeout: `AGENT_CALL_TIMEOUT` seconds, default 120.
-- Retries: 429, 5xx (including 529 "overloaded"), network errors and per-call timeouts
-  are retried up to `AGENT_MAX_ATTEMPTS` (default 5) with exponential backoff and jitter
-  (about 1s, 2s, 4s...). A `Retry-After` header is honored. Other 4xx (bad key, bad
-  request) fail at once, since retrying can't fix them.
-- Ctrl-C cancels cleanly (`signal.NotifyContext`): the in-flight request or shell
-  command is aborted and the agent exits with code 130.
-- Tests: `go test ./internal/llm` uses an `httptest` server that fails and then succeeds.
-
-Remote MCP servers (Streamable HTTP) and multiple servers.
-
-The agent's MCP client (`mcp.go`) is built on the official go-sdk (`mcp.NewClient`). It
-connects to every configured server at startup and offers their tools to the model as
-`mcp__<server>__<tool>`; each call goes to the server that owns the tool. A server that
-fails to connect is reported and skipped. Supported transports:
-- `stdio`: a local command (`mcp.CommandTransport`)
-- `http`: Streamable HTTP, the current remote transport (`mcp.StreamableClientTransport`)
-- `sse`: the older HTTP+SSE transport (`mcp.SSEClientTransport`)
-
-Manage servers like `claude mcp`:
-
-    mini-agent mcp add local ~/.local/bin/mini-mcp                  # stdio
-    mini-agent mcp add deepwiki https://mcp.deepwiki.com/mcp         # remote, no auth
-    mini-agent mcp add -H 'Authorization: Bearer ${MY_TOKEN}' work https://example.com/mcp
-    mini-agent mcp add -t sse old https://example.com/sse            # legacy SSE
-    mini-agent mcp list        # checks each server: ✔ connected, N tools
-    mini-agent mcp get work
-    mini-agent mcp remove work
-
-Config lives in `~/.mini-agent/mcp.json` (or `$AGENT_MCP_CONFIG`). It uses the same shape as
-Claude Code's `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "local":  { "command": "/Users/you/.local/bin/mini-mcp", "args": [], "env": {} },
-    "remote": { "type": "http", "url": "http://127.0.0.1:8090/mcp",
-                "headers": { "Authorization": "Bearer ${MINI_MCP_TOKEN}" } }
-  }
-}
+```bash
+# needs Go 1.22+
+git clone https://github.com/yedamao/mini-agent.git
+cd mini-agent
+go build -o mini-agent .
+# or:
+go install github.com/yedamao/mini-agent@v0.1.0
 ```
 
-`${VAR}` in `headers`, `env`, `url`, `command` and `args` is filled in from the environment
-when connecting, so tokens stay in env vars, not in the file. Quote the `-H` value in single
-quotes so your shell doesn't expand it. A missing variable is an error, not an empty header.
-The file is written with 0600 permissions. `AGENT_MCP=<command>` still works as a shortcut
-for one extra stdio server.
+Put `mini-agent` on your `PATH`, or run it as `./mini-agent`.
 
-`mini-mcp` can be a remote server too:
+## Quickstart
 
-    MINI_MCP_TOKEN=$(openssl rand -hex 16) mini-mcp -http 127.0.0.1:8090    # endpoint: /mcp
-    mini-agent mcp add -H 'Authorization: Bearer ${MINI_MCP_TOKEN}' remote http://127.0.0.1:8090/mcp
+```bash
+export DEEPSEEK_API_KEY=sk-...   # or AGENT_API_KEY
+# optional: HTTP proxy; keep localhost out of the proxy
+# export https_proxy=http://127.0.0.1:8118 NO_PROXY=localhost,127.0.0.1
 
-With `MINI_MCP_TOKEN` set it requires that bearer token; without it, anyone who can reach the
-port can call `go_test`, so bind to 127.0.0.1. If you use a proxy, set
-`NO_PROXY=localhost,127.0.0.1` so local servers aren't sent through it.
-
-Agent Skills (`internal/skills`, `skills.go`).
-
-Skills use the same format as Claude Code ([agentskills.io](https://agentskills.io/specification)).
-A skill is a folder with a `SKILL.md`: YAML frontmatter plus markdown instructions, and
-optionally `scripts/`, `references/` and `assets/`.
-
-```markdown
----
-name: go-test-fixer            # 1-64 chars: a-z, 0-9, single hyphens; must match the folder name
-description: Step-by-step workflow for fixing failing Go tests. Use when go test reports FAIL.
-license: MIT                   # optional
-compatibility: Requires Go.    # optional, max 500 chars
-metadata: {author: yedamao}    # optional
-allowed-tools: Bash Read       # optional, experimental: shown but not enforced
----
-# Steps ...
+mini-agent doctor                # check key, mcp.json, skills
+mini-agent "what time is it?"    # one-shot
+mini-agent                       # interactive TUI (default)
 ```
 
-- **Where skills are found:** user scope is `~/.mini-agent/skills/<name>/`, and project scope is
-  `./.mini-agent/skills/<name>/`. `~/.claude/skills` and `./.claude/skills` are read too, for
-  compatibility with Claude Code. Project overrides user, and invalid skills are skipped with a
-  warning.
-- **Progressive disclosure:** only each skill's name and description go into the system prompt,
-  as an `<available_skills>` list. The model calls `use_skill(name)` to load the full
-  instructions, the skill's folder path and its file list. It then reads files or runs scripts
-  by full path with the normal tools. Skills already loaded are listed in compaction summaries,
-  so the model can load them again if their instructions were summarized away.
-- **CLI:**
-
-      mini-agent skill add examples/skills/go-test-fixer       # a folder, user scope
-      mini-agent skill add https://github.com/anthropics/skills  # a git repo: installs every skill in it
-      mini-agent skill add ./my-skill --project --force         # project scope, replace if present
-      mini-agent skill list
-      mini-agent skill show go-test-fixer
-      mini-agent skill new my-skill [--project]                 # scaffold SKILL.md + scripts/
-      mini-agent skill remove my-skill [--project]
-
-  `add` checks every SKILL.md before copying anything, skips `.git` and keeps scripts
-  executable.
-- **Example:** `examples/skills/go-test-fixer` is a workflow for fixing failing Go tests, with
-  `scripts/failing-tests.sh`. Install it, then run `mini-agent "fix the failing tests"` in
-  `examples/buggy`. The log shows `[skills] loaded go-test-fixer`.
-
-
-
-Day 12-13: eval harness (`mini-agent eval`).
-
-```
-mini-agent eval                      # all cases in evals/cases
-mini-agent eval evals/cases/01_get_time.yaml
-```
-
-Cases are YAML/JSON under `evals/cases/` with a prompt, optional fixture
-(`evals/fixtures/…`), optional local `mcp_server` / `skill_from`, and a grader:
-
-| Grader | Passes when |
-|--------|-------------|
-| `contains` | Final assistant text contains `value` |
-| `not_contains` | Final text does not contain `value` |
-| `json_path` | File `path` has JSON at `json_path` equal to `value` |
-| `shell` | `value` (bash) exits 0 in the case working directory |
-
-Runs are quiet (no TUI). Results go to stdout and `evals/last-run.json`
-(pass/fail, steps, tokens, duration). Graders are unit-tested in `internal/eval`.
+Defaults use DeepSeek’s Anthropic-compatible API. Override with `AGENT_BASE_URL`,
+`AGENT_MODEL`, and `AGENT_API_KEY` (e.g. Anthropic).
 
 ## CLI
 
 ```
-mini-agent -h                 # usage, flags, env vars, examples
-mini-agent "what time is it?" # one-shot task (needs AGENT_API_KEY or DEEPSEEK_API_KEY)
-mini-agent                    # interactive TUI (default)
-mini-agent -i                 # same as bare mini-agent
+mini-agent                         # interactive TUI
+mini-agent "prompt..."             # one-shot task
+mini-agent -i                      # same as bare mini-agent
 mini-agent -q -C examples/buggy "fix the failing tests"
-mini-agent -- "-n means dry-run"   # prompt that starts with a dash
+mini-agent -- "-n means dry-run"   # prompt that starts with -
 
-mini-agent mcp|m ...          # manage MCP servers (no API key)
-mini-agent skill|s ...        # manage Agent Skills (no API key)
-mini-agent doctor             # one-line setup check (key presence, mcp.json, skills)
-mini-agent -v                 # version
+mini-agent mcp|m ...               # manage MCP servers (no API key)
+mini-agent skill|s ...             # manage Agent Skills (no API key)
+mini-agent eval [path]             # run eval cases (needs API key)
+mini-agent doctor                  # setup check
+mini-agent -h / -v                 # help / version
 ```
 
-Global flags: `-h`/`--help`, `-v`/`--version`, `-i`, `-q`/`--quiet`, `-C <dir>`, `--`.
-Subcommands accept `-h` too. Unknown flags print a short error and point to `-h`.
+Flags: `-h`/`--help`, `-v`/`--version`, `-i`, `-q`/`--quiet`, `-C <dir>`, `--`.
 
-## Interactive mode
+### Interactive TUI
 
+On a TTY, `-i` / bare `mini-agent` opens a full-screen bubbletea UI with live
+SSE streaming, slash commands, and a status bar. Non-TTY falls back to a plain
+prompt. Keys: Enter send, Esc cancel turn, Ctrl-C cancel/quit, Ctrl-D quit,
+Tab complete `/`, Up/Down history, PgUp/PgDn scroll. `mini-agent -i -h` lists
+slash commands. Set `NO_COLOR=1` to disable colors.
+
+## Environment
+
+| Variable | Default / purpose |
+|----------|-------------------|
+| `AGENT_API_KEY` / `DEEPSEEK_API_KEY` | API key (required for runs / `-i` / `eval`) |
+| `AGENT_BASE_URL` | `https://api.deepseek.com/anthropic` |
+| `AGENT_MODEL` | `deepseek-chat` |
+| `AGENT_CALL_TIMEOUT` | Per-call timeout seconds (default 120) |
+| `AGENT_MAX_ATTEMPTS` | Retries for transient API errors (default 5) |
+| `AGENT_CONTEXT_BUDGET` | Compact after this many input tokens (default 50000) |
+| `AGENT_MCP` | Extra stdio MCP server command |
+| `AGENT_MCP_CONFIG` | MCP config file (default `~/.mini-agent/mcp.json`) |
+| `NO_COLOR` | Disable ANSI / lipgloss colors |
+
+Retries: 429, 5xx, network errors and per-call timeouts are retried with
+backoff; `Retry-After` is honored. Other 4xx fail immediately. Ctrl-C cancels
+the in-flight call (exit 130).
+
+## Tools
+
+Built-in: `get_time`, `read_file`, `write_file`, `run_shell` (30s timeout,
+~10KB output cap), up to 20 loop steps. Context: old tool results are stubbed;
+prompts over the budget are compacted with a model summary.
+
+`run_shell` runs real commands on your machine — only use it in directories you trust.
+
+Try the Day 5 buggy fixture:
+
+```bash
+go build -o /tmp/mini-agent .
+cd examples/buggy
+/tmp/mini-agent "the tests fail; find and fix the bug, then confirm go test passes"
 ```
-mini-agent                # interactive (default; same as -i)
-mini-agent -i
-mini-agent -i -h          # list slash commands and keys
-mini-agent -h             # root usage
+
+## MCP
+
+Config: `~/.mini-agent/mcp.json` (Claude Code–compatible shape). Transports:
+`stdio`, `http` (Streamable HTTP), `sse`. Tools appear as `mcp__<server>__<tool>`.
+In interactive mode, MCP connects in the background so the TUI paints immediately.
+
+```bash
+go build -o ~/.local/bin/mini-mcp ./cmd/mcp-server
+mini-agent mcp add local ~/.local/bin/mini-mcp
+mini-agent mcp add deepwiki https://mcp.deepwiki.com/mcp
+mini-agent mcp list
 ```
 
-On a TTY, `-i` opens a **full-screen bubbletea TUI** (charmbracelet/bubbletea +
-bubbles + lipgloss):
+`${VAR}` in config fields expands from the environment at connect time. File mode
+is `0600`. See `cmd/mcp-server` (SDK server) and `examples/mcp-from-scratch`
+(hand-rolled JSON-RPC for learning).
 
-- Scrollable transcript (user / assistant / tool / system)
-- Bottom input with Tab completion for `/commands`
-- Status bar: model, tokens, cwd, MCP + skills counts
-- **Live streaming**: assistant text paints as Anthropic-compatible SSE tokens
-  arrive from the DeepSeek endpoint (`stream: true`). Tool calls show as discrete
-  lines when they fire. A spinner runs until the first token.
+## Skills
 
-| Key | Action |
-|-----|--------|
-| Enter | Send |
-| Ctrl-J | Newline in the input |
-| Esc | Cancel the in-flight turn |
-| Ctrl-C | Cancel turn; quit when idle |
-| Ctrl-D | Quit (empty input) |
-| Up / Down | Input history |
-| Tab | Complete `/commands` |
-| PgUp / PgDn / mouse | Scroll the transcript |
+[Agent Skills](https://agentskills.io/specification) format (`SKILL.md` + optional
+`scripts/`). Discovered from `~/.mini-agent/skills` and `./.mini-agent/skills`
+(plus `.claude/skills` for compatibility). Only names/descriptions go in the
+system prompt; the model calls `use_skill` for full instructions.
 
-Non-TTY / pipes fall back to a plain prompt (readline when available, else a
-simple scanner). Set `NO_COLOR=1` to disable colors.
+```bash
+mini-agent skill add examples/skills/go-test-fixer
+mini-agent skill list
+mini-agent -C examples/buggy "fix the failing tests"
+```
 
-| Command | What it does |
-|---------|----------------|
-| `/help` | List slash commands |
-| `/exit` `/quit` `/q` | Leave |
-| `/clear` | Reset the conversation |
-| `/compact` | Force context compaction |
-| `/model [name]` | Show or set the model (this session) |
-| `/budget [n]` | Show or set the context budget (this session) |
-| `/mcp` | Connected MCP servers and tools |
-| `/skills` | Available skills |
-| `/status` | Tokens, model, cwd, servers |
-| `/doctor` | Same checks as `mini-agent doctor` |
+## Evals
+
+```bash
+mini-agent eval                              # evals/cases
+mini-agent eval evals/cases/01_get_time.yaml
+```
+
+YAML/JSON cases with graders: `contains`, `not_contains`, `json_path`, `shell`.
+Quiet, non-TUI. Writes `evals/last-run.json`. Graders are tested in `internal/eval`.
+
+## Develop
+
+```bash
+go test ./...
+go vet ./...
+go build -o mini-agent .
+```
+
+License: MIT.
