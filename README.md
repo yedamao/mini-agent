@@ -210,3 +210,31 @@ mini-agent -v                 # version
 
 Global flags: `-h`/`--help`, `-v`/`--version`, `-i`, `-q`/`--quiet`, `-C <dir>`, `--`.
 Subcommands accept `-h` too. Unknown flags print a short error and point to `-h`.
+
+## Interactive mode
+
+```
+mini-agent -i
+mini-agent -i -h          # list slash commands
+```
+
+A readline-style prompt with history (`~/.mini-agent/history`), Tab completion for
+`/commands`, and a thinking spinner while the model runs. Tool steps stream to the
+terminal as they happen.
+
+| Command | What it does |
+|---------|----------------|
+| `/help` | List slash commands |
+| `/exit` `/quit` `/q` | Leave |
+| `/clear` | Reset the conversation |
+| `/compact` | Force context compaction |
+| `/model [name]` | Show or set the model (this session) |
+| `/budget [n]` | Show or set the context budget (this session) |
+| `/mcp` | Connected MCP servers and tools |
+| `/skills` | Available skills |
+| `/status` | Tokens, model, cwd, servers |
+| `/doctor` | Same checks as `mini-agent doctor` |
+
+Ctrl-C cancels the current turn (or clears the line); press it twice on an empty
+prompt, or use `/exit`, to quit. Ctrl-D on an empty line also quits. End a line
+with `\` to continue a multiline prompt. Set `NO_COLOR=1` to disable ANSI colors.

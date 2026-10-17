@@ -150,3 +150,17 @@ func mustGetwd(t *testing.T) string {
 	}
 	return cwd
 }
+
+func TestInteractiveHelpFlag(t *testing.T) {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	err := run(context.Background(), []string{"-i", "-h"})
+	w.Close()
+	os.Stdout = old
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	if !errors.Is(err, errHelp) || !strings.Contains(buf.String(), "/status") || strings.Contains(buf.String(), "AGENT_BASE_URL") {
+		t.Fatalf("want interactive slash help, got %v\n%s", err, buf.String())
+	}
+}

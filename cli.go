@@ -37,6 +37,7 @@ Flags (before the prompt or subcommand):
   -h, --help       Show this help and exit
   -v, --version    Print the version and exit
   -i               Interactive mode (one conversation across prompts)
+                   mini-agent -i -h  lists slash commands
   -q, --quiet      Less step noise on stderr (answers still on stdout)
   -C <dir>         Run as if started in <dir> (like git -C)
   --               End of flags; the rest is the prompt (even if it starts with -)
@@ -56,6 +57,7 @@ Examples:
   mini-agent -C examples/buggy "fix the failing tests"
   mini-agent -q -- "-n means dry-run; explain that flag"
   mini-agent -i
+  mini-agent -i -h                 # slash commands
   mini-agent mcp add deepwiki https://mcp.deepwiki.com/mcp
   mini-agent skill add examples/skills/go-test-fixer
   mini-agent doctor

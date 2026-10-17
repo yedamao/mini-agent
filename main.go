@@ -5,7 +5,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -106,12 +105,17 @@ func main() {
 // return before the key is checked.
 func run(ctx context.Context, args []string) error {
 	opts, err := parseRoot(args)
-	if err != nil {
-		if errors.Is(err, errHelp) {
-			fmt.Fprint(os.Stdout, rootUsage)
-			return errHelp
-		}
+	if err != nil && !errors.Is(err, errHelp) {
 		return err
+	}
+	// -i -h documents slash commands; plain -h shows root usage.
+	if opts.Help || errors.Is(err, errHelp) {
+		if opts.Interactive {
+			fmt.Fprint(os.Stdout, interactiveHelp)
+		} else {
+			fmt.Fprint(os.Stdout, rootUsage)
+		}
+		return errHelp
 	}
 	if opts.Version {
 		fmt.Printf("mini-agent %s (%s %s/%s)\n", version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
@@ -171,7 +175,9 @@ func run(ctx context.Context, args []string) error {
 	setupSkills()
 
 	if opts.Interactive {
-		repl(ctx)
+		// The REPL owns Ctrl-C (cancel turn / quit). Don't let the parent
+		// signal context kill the whole session on the first interrupt.
+		repl(context.Background())
 		return nil
 	}
 	prompt := strings.Join(args, " ")
@@ -190,38 +196,6 @@ func run(ctx context.Context, args []string) error {
 		os.Exit(code)
 	}
 	return nil
-}
-
-// repl keeps one conversation going across prompts. Type "exit" or press Ctrl-D to quit.
-func repl(ctx context.Context) {
-	var msgs []Message
-	in := bufio.NewScanner(os.Stdin)
-	in.Buffer(make([]byte, 1024*1024), 1024*1024) // allow long pasted prompts
-	for {
-		fmt.Fprint(os.Stderr, "> ")
-		if !in.Scan() {
-			fmt.Fprintln(os.Stderr) // EOF: end the prompt line cleanly
-			return
-		}
-		line := strings.TrimSpace(in.Text())
-		if line == "exit" {
-			return
-		}
-		if line == "" {
-			continue
-		}
-		msgs = addUserText(msgs, line)
-		var err error
-		msgs, err = runAgent(ctx, msgs, line)
-		if ctx.Err() != nil {
-			fmt.Fprintln(os.Stderr, "interrupted")
-			return
-		}
-		if err != nil && !errors.Is(err, errStepLimit) {
-			// Keep the session alive; the history up to the failure is kept.
-			fmt.Fprintln(os.Stderr, "error:", err)
-		}
-	}
 }
 
 // addUserText appends a user prompt. If the history already ends with a user
@@ -259,7 +233,9 @@ func runAgent(ctx context.Context, msgs []Message, request string) ([]Message, e
 				sinceCompact = 0
 			}
 		}
+		spin := startThinking()
 		r, err := callModel(ctx, systemPrompt+skillPrompt, msgs, true)
+		spin.Stop()
 		if err != nil {
 			return msgs, err
 		}
@@ -276,8 +252,13 @@ func runAgent(ctx context.Context, msgs []Message, request string) ([]Message, e
 				remember(b, out)
 				// Log to stderr so stdout stays just the model's answer.
 				if !quiet {
-					fmt.Fprintf(os.Stderr, "[step %d] %s %s -> %s\n",
-						step, b.Name, preview(string(b.Input), 80), preview(out, 120))
+					if interactiveMode {
+						fmt.Fprintf(os.Stderr, "%s [step %d] %s %s → %s\n",
+							color("tool", "⚙"), step, b.Name, preview(string(b.Input), 60), preview(out, 80))
+					} else {
+						fmt.Fprintf(os.Stderr, "[step %d] %s %s -> %s\n",
+							step, b.Name, preview(string(b.Input), 80), preview(out, 120))
+					}
 				}
 				results = append(results, Block{Type: "tool_result", ToolUseID: b.ID, Content: out})
 			}
