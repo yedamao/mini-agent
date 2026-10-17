@@ -30,12 +30,34 @@ func TestParseRootHelpAndVersion(t *testing.T) {
 	}
 }
 
-func TestRunHelpExitAndNoArgs(t *testing.T) {
+func TestRunHelpExit(t *testing.T) {
 	ctx := context.Background()
-	for _, args := range [][]string{nil, {}, {"-h"}, {"--help"}, {"help"}} {
+	for _, args := range [][]string{{"-h"}, {"--help"}, {"help"}} {
 		err := run(ctx, args)
 		if !errors.Is(err, errHelp) {
 			t.Errorf("%v: %v", args, err)
+		}
+	}
+}
+
+func TestRunNoArgsDefaultsToInteractive(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("AGENT_API_KEY", "")
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	saved := apiKey
+	apiKey = ""
+	t.Cleanup(func() { apiKey = saved })
+
+	// Bare invocation should take the interactive path (needs a key), not print help.
+	for _, args := range [][]string{nil, {}, {"-i"}} {
+		err := run(ctx, args)
+		if errors.Is(err, errHelp) {
+			t.Errorf("%v: got help, want interactive (API key required)", args)
+			continue
+		}
+		var ee errExit
+		if !errors.As(err, &ee) || !strings.Contains(ee.Msg, "API key") {
+			t.Errorf("%v: want API-key exit, got %v", args, err)
 		}
 	}
 }

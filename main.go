@@ -129,10 +129,10 @@ func run(ctx context.Context, args []string) error {
 	quiet = opts.Quiet
 	args = opts.Args
 
-	// No-args and explicit help: show usage (not a confusing "no API key").
-	if len(args) == 0 && !opts.Interactive {
-		fmt.Fprint(os.Stdout, rootUsage)
-		return errHelp
+	// No prompt and no subcommand → interactive mode (same as -i).
+	// Explicit -h/--help / "help" still show usage above.
+	if len(args) == 0 {
+		opts.Interactive = true
 	}
 
 	if len(args) > 0 {

@@ -24,8 +24,9 @@ var quiet bool
 const rootUsage = `mini-agent is a from-scratch coding agent in Go.
 
 Usage:
+  mini-agent                         Interactive TUI (default; needs an API key)
   mini-agent [flags] <prompt...>     Run one task (needs an API key)
-  mini-agent [flags] -i              Interactive TUI (needs an API key)
+  mini-agent [flags] -i              Interactive TUI (same as bare mini-agent)
   mini-agent mcp <subcommand> ...    Manage MCP servers (no API key)
   mini-agent skill <subcommand> ...  Manage Agent Skills (no API key)
   mini-agent doctor                  Check the local setup (no API key)
@@ -37,7 +38,7 @@ Flags (before the prompt or subcommand):
   -h, --help       Show this help and exit
   -v, --version    Print the version and exit
   -i               Interactive full-screen TUI (bubbletea); plain prompt if not a TTY
-                   mini-agent -i -h  lists slash commands and keys
+                   Default when no prompt/subcommand is given. mini-agent -i -h lists keys
   -q, --quiet      Less step noise on stderr (answers still on stdout)
   -C <dir>         Run as if started in <dir> (like git -C)
   --               End of flags; the rest is the prompt (even if it starts with -)
@@ -54,11 +55,13 @@ Environment:
   NO_COLOR                           Disable ANSI / lipgloss colors
 
 Examples:
-  mini-agent "what time is it?"
+  mini-agent                       # interactive (default)
+  mini-agent "what time is it?"    # one-shot
   mini-agent -C examples/buggy "fix the failing tests"
   mini-agent -q -- "-n means dry-run; explain that flag"
-  mini-agent -i
+  mini-agent -i                    # same as bare mini-agent
   mini-agent -i -h                 # slash commands + TUI keys
+  mini-agent -h                    # this usage
   mini-agent mcp add deepwiki https://mcp.deepwiki.com/mcp
   mini-agent skill add examples/skills/go-test-fixer
   mini-agent doctor

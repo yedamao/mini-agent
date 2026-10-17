@@ -198,7 +198,8 @@ allowed-tools: Bash Read       # optional, experimental: shown but not enforced
 ```
 mini-agent -h                 # usage, flags, env vars, examples
 mini-agent "what time is it?" # one-shot task (needs AGENT_API_KEY or DEEPSEEK_API_KEY)
-mini-agent -i                 # interactive REPL
+mini-agent                    # interactive TUI (default)
+mini-agent -i                 # same as bare mini-agent
 mini-agent -q -C examples/buggy "fix the failing tests"
 mini-agent -- "-n means dry-run"   # prompt that starts with a dash
 
@@ -214,8 +215,10 @@ Subcommands accept `-h` too. Unknown flags print a short error and point to `-h`
 ## Interactive mode
 
 ```
+mini-agent                # interactive (default; same as -i)
 mini-agent -i
 mini-agent -i -h          # list slash commands and keys
+mini-agent -h             # root usage
 ```
 
 On a TTY, `-i` opens a **full-screen bubbletea TUI** (charmbracelet/bubbletea +
