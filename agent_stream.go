@@ -61,7 +61,7 @@ func runAgentStream(ctx context.Context, msgs []Message, request string, h agent
 			switch b.Type {
 			case "text":
 				// Already streamed via OnText; still print in non-TUI interactive/plain modes.
-				if !isTUI {
+				if !isTUI && !discardAnswers {
 					fmt.Print(b.Text)
 					if b.Text != "" && b.Text[len(b.Text)-1] != '\n' {
 						fmt.Println()

@@ -30,9 +30,10 @@ Usage:
   mini-agent mcp <subcommand> ...    Manage MCP servers (no API key)
   mini-agent skill <subcommand> ...  Manage Agent Skills (no API key)
   mini-agent doctor                  Check the local setup (no API key)
+  mini-agent eval [path]             Run eval cases (needs an API key)
   mini-agent version                 Print the version
 
-Aliases: m = mcp, s = skill, skills = skill
+Aliases: m = mcp, s = skill, skills = skill, e = eval
 
 Flags (before the prompt or subcommand):
   -h, --help       Show this help and exit
@@ -65,6 +66,8 @@ Examples:
   mini-agent mcp add deepwiki https://mcp.deepwiki.com/mcp
   mini-agent skill add examples/skills/go-test-fixer
   mini-agent doctor
+  mini-agent eval                 # run evals/cases
+  mini-agent eval evals/cases/01_get_time.yaml
 `
 
 const mcpUsage = `Manage MCP servers (config: %s). Needs no API key.

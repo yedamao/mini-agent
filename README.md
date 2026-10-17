@@ -193,6 +193,28 @@ allowed-tools: Bash Read       # optional, experimental: shown but not enforced
   `scripts/failing-tests.sh`. Install it, then run `mini-agent "fix the failing tests"` in
   `examples/buggy`. The log shows `[skills] loaded go-test-fixer`.
 
+
+
+Day 12-13: eval harness (`mini-agent eval`).
+
+```
+mini-agent eval                      # all cases in evals/cases
+mini-agent eval evals/cases/01_get_time.yaml
+```
+
+Cases are YAML/JSON under `evals/cases/` with a prompt, optional fixture
+(`evals/fixtures/…`), optional local `mcp_server` / `skill_from`, and a grader:
+
+| Grader | Passes when |
+|--------|-------------|
+| `contains` | Final assistant text contains `value` |
+| `not_contains` | Final text does not contain `value` |
+| `json_path` | File `path` has JSON at `json_path` equal to `value` |
+| `shell` | `value` (bash) exits 0 in the case working directory |
+
+Runs are quiet (no TUI). Results go to stdout and `evals/last-run.json`
+(pass/fail, steps, tokens, duration). Graders are unit-tested in `internal/eval`.
+
 ## CLI
 
 ```

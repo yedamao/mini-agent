@@ -1,0 +1,8 @@
+id: run_shell
+prompt: |
+  Use run_shell to run: echo EVAL-SHELL-OK
+  Put that exact output string in your final answer.
+grader:
+  type: contains
+  value: "EVAL-SHELL-OK"
+timeout_sec: 90

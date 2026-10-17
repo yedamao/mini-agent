@@ -78,6 +78,9 @@ var client = &llm.Client{
 // lastPrompt is the prompt size of the most recent call; it decides compaction.
 var lastPrompt int
 
+// discardAnswers suppresses assistant text on stdout (used by eval).
+var discardAnswers bool
+
 // sinceCompact counts steps since the last compaction (starts high so the first can happen).
 var sinceCompact = minGap
 
@@ -148,6 +151,12 @@ func run(ctx context.Context, args []string) error {
 			return err
 		case "skill", "skills", "s":
 			err := skillCommand(ctx, args[1:], os.Stdout)
+			if errors.Is(err, errHelp) {
+				return errHelp
+			}
+			return err
+		case "eval", "e":
+			err := evalCommand(ctx, args[1:], os.Stdout)
 			if errors.Is(err, errHelp) {
 				return errHelp
 			}
@@ -263,7 +272,9 @@ func runAgent(ctx context.Context, msgs []Message, request string) ([]Message, e
 		for _, b := range r.Content {
 			switch b.Type {
 			case "text":
-				fmt.Println(b.Text)
+				if !discardAnswers {
+					fmt.Println(b.Text)
+				}
 			case "tool_use":
 				out := runTool(ctx, b.Name, b.Input)
 				remember(b, out)

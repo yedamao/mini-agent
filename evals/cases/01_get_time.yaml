@@ -1,0 +1,7 @@
+id: get_time
+prompt: |
+  What time is it right now? You must call the get_time tool, then quote the exact tool result in your answer.
+grader:
+  type: contains
+  value: "2026"
+timeout_sec: 90

@@ -186,3 +186,18 @@ func TestInteractiveHelpFlag(t *testing.T) {
 		t.Fatalf("want interactive slash help, got %v\n%s", err, buf.String())
 	}
 }
+
+func TestEvalHelp(t *testing.T) {
+	ctx := context.Background()
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	err := run(ctx, []string{"eval", "-h"})
+	w.Close()
+	os.Stdout = old
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	if !errors.Is(err, errHelp) || !strings.Contains(buf.String(), "grader") {
+		t.Fatalf("eval -h: %v\n%s", err, buf.String())
+	}
+}

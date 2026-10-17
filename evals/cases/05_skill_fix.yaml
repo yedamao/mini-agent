@@ -1,0 +1,10 @@
+id: skill_fix
+fixture: buggy
+skill_from: examples/skills/go-test-fixer
+prompt: |
+  The Go tests in this directory fail because of a bug. Use the go-test-fixer skill if helpful.
+  Find and fix the bug with write_file, then run go test and make sure it passes.
+grader:
+  type: shell
+  value: "go test ."
+timeout_sec: 300

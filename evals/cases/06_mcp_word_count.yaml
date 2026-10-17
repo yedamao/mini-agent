@@ -1,0 +1,10 @@
+id: mcp_word_count
+mcp_server: bin/mcp-server
+prompt: |
+  You have an MCP tool whose name starts with mcp__ and ends with __word_count.
+  Call it with text "one two three four". In your final answer quote the tool result exactly
+  (it looks like: words: N, lines: N, characters: N).
+grader:
+  type: contains
+  value: "words: 4"
+timeout_sec: 120

@@ -1,0 +1,9 @@
+id: write_read
+cwd: .
+prompt: |
+  Using write_file, create a file named eval-out.txt containing exactly the line HELLO-EVAL.
+  Then read it back with read_file and confirm the contents in your final answer.
+grader:
+  type: shell
+  value: 'grep -qx "HELLO-EVAL" eval-out.txt'
+timeout_sec: 120

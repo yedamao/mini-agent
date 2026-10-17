@@ -1,0 +1,8 @@
+id: read_file
+fixture: notes
+prompt: |
+  Read the file notes.txt in the current directory with read_file and tell me the secret token it contains.
+grader:
+  type: contains
+  value: "ALPHA-TOKEN-42"
+timeout_sec: 90

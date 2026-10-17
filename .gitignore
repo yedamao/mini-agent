@@ -1,2 +1,4 @@
 .env
 /mini-agent
+evals/last-run.json
+bin/
