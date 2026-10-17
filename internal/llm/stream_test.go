@@ -105,3 +105,98 @@ func TestReadSSEHandlerCancel(t *testing.T) {
 		t.Fatalf("want started cancel, got %v", err)
 	}
 }
+
+// splitToolSSE mirrors a real Anthropic/DeepSeek stream: tool_use starts with
+// input:{}, then the args arrive as several input_json_delta.partial_json pieces.
+const splitToolSSE = `event: message_start
+data: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","content":[],"usage":{"input_tokens":3,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu_1","name":"run_shell","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"echo hi\""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":8}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+
+func TestReadSSEToolInputSplitDeltas(t *testing.T) {
+	var ready json.RawMessage
+	resp, err := readSSE(strings.NewReader(splitToolSSE), func(ev StreamEvent) error {
+		if ev.Kind == "tool_ready" {
+			ready = append(json.RawMessage(nil), ev.ToolInput...)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"command":"echo hi"}`
+	if len(resp.Content) != 1 || resp.Content[0].Name != "run_shell" {
+		t.Fatalf("content = %+v", resp.Content)
+	}
+	got := string(resp.Content[0].Input)
+	if got != want {
+		t.Fatalf("Block.Input = %s, want %s", got, want)
+	}
+	if string(ready) != want {
+		t.Fatalf("tool_ready input = %s, want %s", ready, want)
+	}
+	// Must not be the empty-object fallback that caused run_shell/read_file failures.
+	if got == "{}" {
+		t.Fatal("got empty {}, input deltas were dropped")
+	}
+}
+
+func TestReadSSEToolInputEmptyObjectOnly(t *testing.T) {
+	// Tool with no args: start input:{} and a single delta "{}" (no seed from start).
+	const sse = `event: message_start
+data: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"get_time","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+	resp, err := readSSE(strings.NewReader(sse), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(resp.Content[0].Input) != "{}" {
+		t.Fatalf("Input = %s", resp.Content[0].Input)
+	}
+}
+
+func TestIsEmptyJSONObject(t *testing.T) {
+	if !isEmptyJSONObject([]byte(`{}`)) || !isEmptyJSONObject([]byte(`{ }`)) {
+		t.Fatal("expected empty object")
+	}
+	if isEmptyJSONObject([]byte(`{"a":1}`)) || isEmptyJSONObject([]byte(`[]`)) {
+		t.Fatal("expected non-empty / non-object")
+	}
+}

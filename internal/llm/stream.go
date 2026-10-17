@@ -138,10 +138,7 @@ func readSSE(r io.Reader, h StreamHandler) (*Response, error) {
 		if curType != "tool_use" {
 			return
 		}
-		raw := json.RawMessage(curInput.String())
-		if !json.Valid(raw) {
-			raw = json.RawMessage(`{}`)
-		}
+		raw := finalizeToolInput(curInput.String())
 		blocks = append(blocks, Block{Type: "tool_use", ID: curID, Name: curName, Input: raw})
 		if h != nil {
 			_ = h(StreamEvent{Kind: "tool_ready", ToolID: curID, ToolName: curName, ToolInput: raw, ToolIndex: curIndex})
@@ -207,8 +204,14 @@ func readSSE(r io.Reader, h StreamHandler) (*Response, error) {
 				}
 			}
 			if curType == "tool_use" {
-				if len(start.ContentBlock.Input) > 0 && string(start.ContentBlock.Input) != "null" {
-					curInput.Write(start.ContentBlock.Input)
+				// Anthropic (and DeepSeek's Anthropic-compatible stream) sends
+				// content_block_start with a placeholder input:{} ; the real JSON
+				// arrives as concatenated input_json_delta.partial_json fragments.
+				// Seeding from "{}" and then appending deltas yields invalid JSON
+				// like `{}{"command":"ls"}`, which flushTool used to replace with {}.
+				if in := bytes.TrimSpace(start.ContentBlock.Input); len(in) > 0 &&
+					string(in) != "null" && !isEmptyJSONObject(in) {
+					curInput.Write(in)
 				}
 				if h != nil {
 					_ = h(StreamEvent{Kind: "tool_start", ToolID: curID, ToolName: curName, ToolIndex: curIndex})
@@ -334,4 +337,29 @@ func hasToolUse(blocks []Block) bool {
 		}
 	}
 	return false
+}
+
+// finalizeToolInput turns the accumulated partial_json string into a RawMessage.
+// Empty input becomes {}. Invalid JSON falls back to {} so the agent loop can
+// still surface a tool error rather than crashing the stream parse.
+func finalizeToolInput(s string) json.RawMessage {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return json.RawMessage(`{}`)
+	}
+	raw := json.RawMessage(s)
+	if !json.Valid(raw) {
+		return json.RawMessage(`{}`)
+	}
+	return raw
+}
+
+// isEmptyJSONObject reports whether b is a JSON object with no keys (the
+// streaming placeholder input:{} on content_block_start).
+func isEmptyJSONObject(b []byte) bool {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		return false
+	}
+	return len(m) == 0
 }
