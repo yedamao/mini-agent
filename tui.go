@@ -10,20 +10,23 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/yedamao/mini-agent/internal/mcpconf"
 	"golang.org/x/term"
 )
 
 // runTUI launches the full-screen bubbletea UI. Falls back to plainRepl if the
 // terminal is not a TTY or bubbletea fails to start.
-func runTUI(parent context.Context) {
+func runTUI(parent context.Context, servers map[string]mcpconf.Server) {
 	if !term.IsTerminal(int(os.Stdout.Fd())) || !term.IsTerminal(int(os.Stdin.Fd())) {
 		fmt.Fprintln(os.Stderr, color("dim", "non-TTY; using plain prompt"))
+		startMCPBackground(parent, servers, nil)
 		plainRepl(parent)
 		return
 	}
@@ -32,7 +35,7 @@ func runTUI(parent context.Context) {
 	interactiveMode = true
 	defer func() { interactiveMode = false }()
 
-	m := newTUIModel(parent)
+	m := newTUIModel(parent, servers)
 	p := tea.NewProgram(m,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
@@ -59,9 +62,11 @@ type chatLine struct {
 }
 
 type tuiModel struct {
-	parent context.Context
-	st     *replState
-	prog   *tea.Program
+	parent      context.Context
+	st          *replState
+	prog        *tea.Program
+	servers     map[string]mcpconf.Server // connected in Init (background)
+	benchFramed bool
 
 	vp   viewport.Model
 	ta   textarea.Model
@@ -87,7 +92,7 @@ type tuiModel struct {
 	quitOnce sync.Once
 }
 
-func newTUIModel(parent context.Context) *tuiModel {
+func newTUIModel(parent context.Context, servers map[string]mcpconf.Server) *tuiModel {
 	ta := textarea.New()
 	ta.Placeholder = "Ask anything…  /help  Enter send  Esc cancel  Ctrl-D quit"
 	ta.Prompt = "❯ "
@@ -101,13 +106,21 @@ func newTUIModel(parent context.Context) *tuiModel {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
+	status := "ready"
+	if len(servers) > 0 {
+		status = "mcp connecting…"
+		setMCPStatus("connecting")
+	} else {
+		setMCPStatus("none")
+	}
 	m := &tuiModel{
 		parent:  parent,
 		st:      &replState{},
+		servers: servers,
 		ta:      ta,
 		spin:    sp,
 		histIdx: -1,
-		status:  "ready",
+		status:  status,
 		lines: []chatLine{
 			{Role: roleSystem, Text: "mini-agent — /help for commands · Enter send · Esc cancel turn · Ctrl-C cancel / quit · Ctrl-D quit"},
 		},
@@ -120,7 +133,30 @@ func newTUIModel(parent context.Context) *tuiModel {
 }
 
 func (m *tuiModel) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, m.spin.Tick)
+	return tea.Batch(textarea.Blink, m.spin.Tick, m.connectMCPCmd())
+}
+
+type mcpDoneMsg struct{ Text string }
+
+func (m *tuiModel) connectMCPCmd() tea.Cmd {
+	if len(m.servers) == 0 {
+		setMCPStatus("none")
+		return nil
+	}
+	servers := m.servers
+	m.servers = nil
+	parent := m.parent
+	return func() tea.Msg {
+		// Kick off MCP without blocking this Cmd (or the UI). Completion
+		// arrives via Program.Send → mcpDoneMsg.
+		prog := m.prog
+		startMCPBackground(parent, servers, func(status string) {
+			if prog != nil {
+				prog.Send(mcpDoneMsg{Text: status})
+			}
+		})
+		return mcpDoneMsg{Text: "mcp connecting…"}
+	}
 }
 
 type textDeltaMsg string
@@ -143,6 +179,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if !benchLaunchStart.IsZero() && !m.benchFramed {
+			m.benchFramed = true
+			ms := time.Since(benchLaunchStart).Milliseconds()
+			fmt.Fprintf(os.Stderr, "BENCH first_interactive_frame_ms=%d mcp_status=%s\n", ms, MCPStatus())
+			return m, tea.Quit
+		}
 		headerH := 1
 		statusH := 1
 		inputH := m.ta.Height() + 1
@@ -292,6 +334,16 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Ensure assistant bubble ends cleanly
 		m.refreshViewport()
+
+	case mcpDoneMsg:
+		m.status = msg.Text
+		if strings.HasPrefix(msg.Text, "mcp ready") || msg.Text == "mcp=0" {
+			// keep ready after a beat
+		} else if msg.Text == "mcp failed" {
+			m.appendLine(roleSystem, "MCP connect failed or timed out; built-in tools still work")
+			m.refreshViewport()
+		}
+		return m, nil
 
 	case compactDoneMsg:
 		m.busy = false
@@ -505,16 +557,17 @@ func (m *tuiModel) View() string {
 func (m *tuiModel) statusBar() string {
 	cwd, _ := os.Getwd()
 	cwd = shortPath(cwd)
-	mcpN := 0
-	if hub != nil {
-		mcpN = len(hub.sessions)
+	mcpN := mcpSessionCount()
+	mcpLabel := fmt.Sprintf("mcp=%d", mcpN)
+	if st := MCPStatus(); st == "connecting" {
+		mcpLabel = "mcp=connecting…"
 	}
 	tok := fmt.Sprintf("in=%d out=%d", totalIn, totalOut)
 	parts := []string{
 		shortModel(),
 		tok,
 		cwd,
-		fmt.Sprintf("mcp=%d", mcpN),
+		mcpLabel,
 		fmt.Sprintf("skills=%d", len(availableSkills)),
 		m.status,
 	}

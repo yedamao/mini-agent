@@ -25,6 +25,9 @@ var (
 	apiKey  = env("AGENT_API_KEY", os.Getenv("DEEPSEEK_API_KEY"))
 )
 
+// benchLaunchStart is set when AGENT_BENCH_LAUNCH=1 to time first TUI frame.
+var benchLaunchStart time.Time
+
 // systemPrompt tells the model how to behave as a coding agent.
 const systemPrompt = `You are a coding agent working in the current directory.
 - Do only what the user asks. Change files only when the task asks for a change;
@@ -170,16 +173,30 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("mcp config: %w", err)
 	}
-	startMCP(ctx, servers)
+	// Skills are local (sub-ms). Suppress the banner when we're about to take
+	// over the screen so stderr doesn't flash before the TUI.
+	if opts.Interactive {
+		savedQuiet := quiet
+		quiet = true
+		setupSkills()
+		quiet = savedQuiet
+	} else {
+		setupSkills()
+	}
 	defer stopMCP()
-	setupSkills()
 
 	if opts.Interactive {
-		// The REPL owns Ctrl-C (cancel turn / quit). Don't let the parent
-		// signal context kill the whole session on the first interrupt.
-		repl(context.Background())
+		// Paint the TUI first; MCP connects in the background (see tui Init).
+		// One-shot mode still waits for MCP below so tools exist before the call.
+		if os.Getenv("AGENT_BENCH_LAUNCH") == "1" {
+			benchLaunchStart = time.Now()
+		}
+		mcpCtx, cancel := context.WithCancel(context.Background())
+		defer cancel() // cancel before stopMCP (deferred earlier) so connect aborts
+		repl(mcpCtx, servers)
 		return nil
 	}
+	startMCP(ctx, servers)
 	prompt := strings.Join(args, " ")
 	_, err = runAgent(ctx, []Message{{Role: "user", Content: prompt}}, prompt)
 	if err != nil {

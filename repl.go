@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/chzyer/readline"
+	"github.com/yedamao/mini-agent/internal/mcpconf"
 	"golang.org/x/term"
 )
 
@@ -26,11 +27,13 @@ var isTUI bool // full-screen bubbletea; suppresses duplicate stdout prints
 // repl runs the interactive session until /exit, Ctrl-D, or two Ctrl-C on an empty prompt.
 // On a TTY it opens the full-screen bubbletea UI; otherwise it falls back to the
 // readline REPL, then to a plain scanner for pipes.
-func repl(parent context.Context) {
+func repl(parent context.Context, servers map[string]mcpconf.Server) {
 	if term.IsTerminal(int(os.Stdout.Fd())) && term.IsTerminal(int(os.Stdin.Fd())) {
-		runTUI(parent)
+		runTUI(parent, servers)
 		return
 	}
+	// Non-TTY: still don't block the first prompt on MCP network I/O.
+	startMCPBackground(parent, servers, nil)
 	readlineRepl(parent)
 }
 

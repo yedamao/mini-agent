@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -44,6 +45,26 @@ type mcpHub struct {
 
 var hub *mcpHub // nil when no MCP servers are configured
 
+// mcpMu guards hub and toolDefs appends from the background interactive connect.
+var (
+	mcpMu     sync.Mutex
+	mcpWG     sync.WaitGroup
+	mcpStatus = "idle" // idle | connecting | ready | none | error
+)
+
+// MCPStatus returns a short status for the TUI status bar.
+func MCPStatus() string {
+	mcpMu.Lock()
+	defer mcpMu.Unlock()
+	return mcpStatus
+}
+
+func setMCPStatus(s string) {
+	mcpMu.Lock()
+	mcpStatus = s
+	mcpMu.Unlock()
+}
+
 // mcpServers returns the servers to connect to: the config file, plus
 // AGENT_MCP=<command> as a shortcut for one stdio server.
 func mcpServers() (map[string]mcpconf.Server, error) {
@@ -63,9 +84,13 @@ func mcpServers() (map[string]mcpconf.Server, error) {
 // A server that fails is reported and skipped; the others still work.
 func startMCP(ctx context.Context, servers map[string]mcpconf.Server) {
 	if len(servers) == 0 {
+		setMCPStatus("none")
 		return
 	}
+	setMCPStatus("connecting")
+	mcpMu.Lock()
 	hub = &mcpHub{sessions: map[string]*mcp.ClientSession{}, tools: map[string]mcpTool{}}
+	mcpMu.Unlock()
 	for _, name := range sortedKeys(servers) {
 		session, tools, err := connectServer(ctx, name, servers[name], 30*time.Second)
 		if err != nil {
@@ -74,6 +99,7 @@ func startMCP(ctx context.Context, servers map[string]mcpconf.Server) {
 			}
 			continue
 		}
+		mcpMu.Lock()
 		hub.sessions[name] = session
 		var names []string
 		for _, t := range tools {
@@ -86,10 +112,55 @@ func startMCP(ctx context.Context, servers map[string]mcpconf.Server) {
 			})
 			names = append(names, fullName)
 		}
+		mcpMu.Unlock()
 		if !quiet {
 			fmt.Fprintf(os.Stderr, "[mcp] %s (%s): %s\n", name, servers[name].Transport(), strings.Join(names, ", "))
 		}
 	}
+	mcpMu.Lock()
+	n := 0
+	if hub != nil {
+		n = len(hub.sessions)
+	}
+	mcpMu.Unlock()
+	if n == 0 {
+		setMCPStatus("error")
+	} else {
+		setMCPStatus("ready")
+	}
+}
+
+// startMCPBackground connects MCP off the interactive UI thread.
+// onDone is called once (may be nil) with a short status line for the TUI.
+func startMCPBackground(ctx context.Context, servers map[string]mcpconf.Server, onDone func(status string)) {
+	if len(servers) == 0 {
+		setMCPStatus("none")
+		if onDone != nil {
+			onDone("mcp=0")
+		}
+		return
+	}
+	mcpWG.Add(1)
+	go func() {
+		defer mcpWG.Done()
+		saved := quiet
+		quiet = true // don't write [mcp] lines over the alt screen
+		startMCP(ctx, servers)
+		quiet = saved
+		n := 0
+		mcpMu.Lock()
+		if hub != nil {
+			n = len(hub.sessions)
+		}
+		mcpMu.Unlock()
+		msg := fmt.Sprintf("mcp ready (%d)", n)
+		if n == 0 {
+			msg = "mcp failed"
+		}
+		if onDone != nil {
+			onDone(msg)
+		}
+	}()
 }
 
 // connectServer opens a session and lists the server's tools, giving up
@@ -190,7 +261,13 @@ func httpClientWithHeaders(h map[string]string) *http.Client {
 
 // callMCPTool forwards a model tool call to the server that owns the tool.
 func callMCPTool(ctx context.Context, name string, input json.RawMessage) string {
+	mcpMu.Lock()
+	if hub == nil {
+		mcpMu.Unlock()
+		return "error: MCP not connected yet"
+	}
 	t, ok := hub.tools[name]
+	mcpMu.Unlock()
 	if !ok {
 		return "error: unknown MCP tool " + name
 	}
@@ -229,6 +306,9 @@ func callMCPTool(ctx context.Context, name string, input json.RawMessage) string
 
 // stopMCP closes every session (stdio servers are terminated).
 func stopMCP() {
+	mcpWG.Wait() // let a background connect finish (or fail) first
+	mcpMu.Lock()
+	defer mcpMu.Unlock()
 	if hub == nil {
 		return
 	}
@@ -236,6 +316,7 @@ func stopMCP() {
 		s.Close()
 	}
 	hub = nil
+	mcpStatus = "idle"
 }
 
 // toolName builds mcp__<server>__<tool>, kept within the 64-character
@@ -272,4 +353,13 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func mcpSessionCount() int {
+	mcpMu.Lock()
+	defer mcpMu.Unlock()
+	if hub == nil {
+		return 0
+	}
+	return len(hub.sessions)
 }

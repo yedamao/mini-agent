@@ -207,16 +207,27 @@ func slashBudget(_ context.Context, args string, _ *replState, out io.Writer) sl
 }
 
 func slashMCP(_ context.Context, _ string, _ *replState, out io.Writer) slashResult {
-	if hub == nil || len(hub.sessions) == 0 {
+	if st := MCPStatus(); st == "connecting" {
+		fmt.Fprintln(out, "MCP still connecting…")
+		return slashResult{Handled: true}
+	}
+	if mcpSessionCount() == 0 {
 		fmt.Fprintln(out, "No MCP servers connected. Add some with: mini-agent mcp add ...")
 		return slashResult{Handled: true}
 	}
-	// Group tools by server.
+	// Group tools by server (snapshot under lock).
+	mcpMu.Lock()
 	by := map[string][]string{}
+	sessions := make([]string, 0, len(hub.sessions))
 	for full, t := range hub.tools {
 		by[t.server] = append(by[t.server], full)
 	}
-	for _, name := range sortedKeys(hub.sessions) {
+	for name := range hub.sessions {
+		sessions = append(sessions, name)
+	}
+	mcpMu.Unlock()
+	sort.Strings(sessions)
+	for _, name := range sessions {
 		tools := by[name]
 		sort.Strings(tools)
 		fmt.Fprintf(out, "%s (%d tools)\n", color("accent", name), len(tools))
@@ -250,11 +261,12 @@ func slashStatus(_ context.Context, _ string, st *replState, out io.Writer) slas
 	fmt.Fprintf(out, "budget:   %d tokens (last prompt %d)\n", contextBudget, lastPrompt)
 	fmt.Fprintf(out, "tokens:   in=%d out=%d (session totals)\n", totalIn, totalOut)
 	fmt.Fprintf(out, "turns:    %d   messages: %d\n", st.Turns, len(st.Msgs))
-	nMCP := 0
-	if hub != nil {
-		nMCP = len(hub.sessions)
+	nMCP := mcpSessionCount()
+	mcpLine := fmt.Sprintf("%d server(s)", nMCP)
+	if MCPStatus() == "connecting" {
+		mcpLine = "connecting…"
 	}
-	fmt.Fprintf(out, "mcp:      %d server(s)\n", nMCP)
+	fmt.Fprintf(out, "mcp:      %s\n", mcpLine)
 	fmt.Fprintf(out, "skills:   %d available", len(availableSkills))
 	if n := len(loadedSkills); n > 0 {
 		fmt.Fprintf(out, ", %d loaded", n)
