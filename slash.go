@@ -268,8 +268,9 @@ func slashDoctor(ctx context.Context, _ string, _ *replState, out io.Writer) sla
 	return slashResult{Handled: true}
 }
 
-const interactiveHelp = `Interactive mode slash commands:
+const interactiveHelp = `Interactive mode (full-screen TUI on a TTY; plain prompt in pipes).
 
+Slash commands:
   /help              Show this help
   /exit  /quit  /q   Leave interactive mode
   /clear             Reset the conversation (MCP & skills stay)
@@ -281,11 +282,19 @@ const interactiveHelp = `Interactive mode slash commands:
   /status            Tokens, model, cwd, servers, skills
   /doctor            Same checks as ` + "`mini-agent doctor`" + `
 
-Tips:
-  • Up/Down browse input history; Tab completes /commands
-  • Ctrl-C cancels the current turn (or clears the line); twice or /exit to quit
-  • Ctrl-D on an empty line quits
-  • End a line with \ to continue a multiline prompt
+Keys (TUI):
+  Enter              Send
+  Ctrl-J             Newline in the input box
+  Esc                Cancel the in-flight turn
+  Ctrl-C             Cancel turn; on idle, quit
+  Ctrl-D             Quit (empty input)
+  Up/Down            Input history
+  Tab                Complete /commands
+  PgUp/PgDn / mouse  Scroll the transcript
+
+Answers stream into the assistant bubble as tokens arrive (Anthropic-compatible
+SSE). Tool calls appear as discrete lines. A spinner shows until the first token.
+Non-TTY / pipes use the plain prompt (no alt screen). Set NO_COLOR=1 to disable colors.
 `
 
 // color wraps s in ANSI codes unless NO_COLOR is set or stdout isn't a TTY-ish env.

@@ -30,7 +30,7 @@ Day 6-7: context management (`context.go`).
 - When a prompt goes over `AGENT_CONTEXT_BUDGET` input tokens (default 50000), the
   middle of the history is replaced by a model-written summary. The first task and the
   last few turns stay, and a tool call is never separated from its result.
-- `go run . -i` starts an interactive session, so one conversation continues across prompts.
+- `go run . -i` starts a full-screen interactive TUI (streamed answers); non-TTY uses a plain prompt.
 
 Watch compaction happen with a tiny budget:
 
@@ -215,12 +215,32 @@ Subcommands accept `-h` too. Unknown flags print a short error and point to `-h`
 
 ```
 mini-agent -i
-mini-agent -i -h          # list slash commands
+mini-agent -i -h          # list slash commands and keys
 ```
 
-A readline-style prompt with history (`~/.mini-agent/history`), Tab completion for
-`/commands`, and a thinking spinner while the model runs. Tool steps stream to the
-terminal as they happen.
+On a TTY, `-i` opens a **full-screen bubbletea TUI** (charmbracelet/bubbletea +
+bubbles + lipgloss):
+
+- Scrollable transcript (user / assistant / tool / system)
+- Bottom input with Tab completion for `/commands`
+- Status bar: model, tokens, cwd, MCP + skills counts
+- **Live streaming**: assistant text paints as Anthropic-compatible SSE tokens
+  arrive from the DeepSeek endpoint (`stream: true`). Tool calls show as discrete
+  lines when they fire. A spinner runs until the first token.
+
+| Key | Action |
+|-----|--------|
+| Enter | Send |
+| Ctrl-J | Newline in the input |
+| Esc | Cancel the in-flight turn |
+| Ctrl-C | Cancel turn; quit when idle |
+| Ctrl-D | Quit (empty input) |
+| Up / Down | Input history |
+| Tab | Complete `/commands` |
+| PgUp / PgDn / mouse | Scroll the transcript |
+
+Non-TTY / pipes fall back to a plain prompt (readline when available, else a
+simple scanner). Set `NO_COLOR=1` to disable colors.
 
 | Command | What it does |
 |---------|----------------|
@@ -234,7 +254,3 @@ terminal as they happen.
 | `/skills` | Available skills |
 | `/status` | Tokens, model, cwd, servers |
 | `/doctor` | Same checks as `mini-agent doctor` |
-
-Ctrl-C cancels the current turn (or clears the line); press it twice on an empty
-prompt, or use `/exit`, to quit. Ctrl-D on an empty line also quits. End a line
-with `\` to continue a multiline prompt. Set `NO_COLOR=1` to disable ANSI colors.

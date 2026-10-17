@@ -16,13 +16,25 @@ import (
 	"time"
 
 	"github.com/chzyer/readline"
+	"golang.org/x/term"
 )
 
 // interactiveMode is set while the REPL runs so the agent loop can show a spinner.
 var interactiveMode bool
+var isTUI bool // full-screen bubbletea; suppresses duplicate stdout prints
 
 // repl runs the interactive session until /exit, Ctrl-D, or two Ctrl-C on an empty prompt.
+// On a TTY it opens the full-screen bubbletea UI; otherwise it falls back to the
+// readline REPL, then to a plain scanner for pipes.
 func repl(parent context.Context) {
+	if term.IsTerminal(int(os.Stdout.Fd())) && term.IsTerminal(int(os.Stdin.Fd())) {
+		runTUI(parent)
+		return
+	}
+	readlineRepl(parent)
+}
+
+func readlineRepl(parent context.Context) {
 	interactiveMode = true
 	defer func() { interactiveMode = false }()
 

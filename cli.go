@@ -25,7 +25,7 @@ const rootUsage = `mini-agent is a from-scratch coding agent in Go.
 
 Usage:
   mini-agent [flags] <prompt...>     Run one task (needs an API key)
-  mini-agent [flags] -i              Interactive REPL (needs an API key)
+  mini-agent [flags] -i              Interactive TUI (needs an API key)
   mini-agent mcp <subcommand> ...    Manage MCP servers (no API key)
   mini-agent skill <subcommand> ...  Manage Agent Skills (no API key)
   mini-agent doctor                  Check the local setup (no API key)
@@ -36,8 +36,8 @@ Aliases: m = mcp, s = skill, skills = skill
 Flags (before the prompt or subcommand):
   -h, --help       Show this help and exit
   -v, --version    Print the version and exit
-  -i               Interactive mode (one conversation across prompts)
-                   mini-agent -i -h  lists slash commands
+  -i               Interactive full-screen TUI (bubbletea); plain prompt if not a TTY
+                   mini-agent -i -h  lists slash commands and keys
   -q, --quiet      Less step noise on stderr (answers still on stdout)
   -C <dir>         Run as if started in <dir> (like git -C)
   --               End of flags; the rest is the prompt (even if it starts with -)
@@ -51,13 +51,14 @@ Environment:
   AGENT_CONTEXT_BUDGET               Input-token budget before compaction (default 50000)
   AGENT_MCP                          Extra stdio MCP server (path to a command)
   AGENT_MCP_CONFIG                   MCP config file (default ~/.mini-agent/mcp.json)
+  NO_COLOR                           Disable ANSI / lipgloss colors
 
 Examples:
   mini-agent "what time is it?"
   mini-agent -C examples/buggy "fix the failing tests"
   mini-agent -q -- "-n means dry-run; explain that flag"
   mini-agent -i
-  mini-agent -i -h                 # slash commands
+  mini-agent -i -h                 # slash commands + TUI keys
   mini-agent mcp add deepwiki https://mcp.deepwiki.com/mcp
   mini-agent skill add examples/skills/go-test-fixer
   mini-agent doctor
