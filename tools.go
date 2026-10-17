@@ -8,8 +8,8 @@ import (
 	"github.com/yedamao/mini-agent/internal/tools"
 )
 
-// The built-in tools live in internal/tools so the Temporal worker can share
-// them. These thin wrappers keep the rest of this package short.
+// The built-in tools live in internal/tools; these thin wrappers keep the
+// rest of this package short.
 
 // toolDefs is what we offer the model: the built-in tools, plus any MCP tools
 // added at startup (see mcp.go).
