@@ -1,6 +1,7 @@
 package mcpconf
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -10,6 +11,10 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 	cfg, err := Load(path) // missing file = empty config
 	if err != nil || len(cfg.MCPServers) != 0 {
 		t.Fatalf("load missing: %v %v", cfg, err)
+	}
+	os.WriteFile(path+".empty", nil, 0o600)
+	if c, err := Load(path + ".empty"); err != nil || len(c.MCPServers) != 0 {
+		t.Errorf("empty file: %v %v", c, err)
 	}
 	cfg.MCPServers["local"] = Server{Command: "mini-mcp", Args: []string{"-x"}}
 	cfg.MCPServers["remote"] = Server{Type: "http", URL: "http://h/mcp", Headers: map[string]string{"Authorization": "Bearer ${TOK}"}}

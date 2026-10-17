@@ -19,6 +19,9 @@ type toolInput = tools.Input
 
 // runTool runs a built-in tool, or forwards mcp__ tools to the MCP server that owns them.
 func runTool(ctx context.Context, name string, raw json.RawMessage) string {
+	if name == useSkillTool && availableSkills != nil {
+		return useSkill(raw)
+	}
 	if strings.HasPrefix(name, mcpPrefix) && hub != nil {
 		return callMCPTool(ctx, name, raw)
 	}

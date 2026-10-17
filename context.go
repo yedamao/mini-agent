@@ -177,6 +177,7 @@ func compact(ctx context.Context, msgs []Message, request string) ([]Message, er
 	if list := filesReadList(); list != "" {
 		summary += "\n\nFiles already read (re-read only if you need exact contents):\n" + list
 	}
+	summary += loadedSkillsNote()
 
 	// New history: first prompt + summary (+ the current request, if different),
 	// then the recent tail.

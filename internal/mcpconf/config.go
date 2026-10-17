@@ -16,6 +16,7 @@
 package mcpconf
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -133,6 +134,9 @@ func Load(path string) (*Config, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return cfg, nil // an empty file is an empty config
 	}
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)

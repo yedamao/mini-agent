@@ -89,9 +89,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	args := os.Args[1:]
-	// `mini-agent mcp ...` edits the MCP config; it needs no API key.
-	if len(args) > 0 && args[0] == "mcp" {
-		if err := mcpCommand(ctx, args[1:], os.Stdout); err != nil {
+	// `mini-agent mcp ...` and `mini-agent skill ...` manage config; no API key needed.
+	if len(args) > 0 && (args[0] == "mcp" || args[0] == "skill" || args[0] == "skills") {
+		cmd := mcpCommand
+		if args[0] != "mcp" {
+			cmd = skillCommand
+		}
+		if err := cmd(ctx, args[1:], os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -109,6 +113,7 @@ func main() {
 	}
 	startMCP(ctx, servers)
 	defer stopMCP()
+	setupSkills()
 	if len(args) > 0 && args[0] == "-i" {
 		repl(ctx)
 		return
@@ -196,7 +201,7 @@ func runAgent(ctx context.Context, msgs []Message, request string) ([]Message, e
 				sinceCompact = 0
 			}
 		}
-		r, err := callModel(ctx, systemPrompt, msgs, true)
+		r, err := callModel(ctx, systemPrompt+skillPrompt, msgs, true)
 		if err != nil {
 			return msgs, err
 		}

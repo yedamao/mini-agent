@@ -149,3 +149,46 @@ for one extra stdio server.
 With `MINI_MCP_TOKEN` set it requires that bearer token; without it, anyone who can reach the
 port can call `go_test`, so bind to 127.0.0.1. If you use a proxy, set
 `NO_PROXY=localhost,127.0.0.1` so local servers aren't sent through it.
+
+Agent Skills (`internal/skills`, `skills.go`).
+
+Skills use the same format as Claude Code ([agentskills.io](https://agentskills.io/specification)).
+A skill is a folder with a `SKILL.md`: YAML frontmatter plus markdown instructions, and
+optionally `scripts/`, `references/` and `assets/`.
+
+```markdown
+---
+name: go-test-fixer            # 1-64 chars: a-z, 0-9, single hyphens; must match the folder name
+description: Step-by-step workflow for fixing failing Go tests. Use when go test reports FAIL.
+license: MIT                   # optional
+compatibility: Requires Go.    # optional, max 500 chars
+metadata: {author: yedamao}    # optional
+allowed-tools: Bash Read       # optional, experimental: shown but not enforced
+---
+# Steps ...
+```
+
+- **Where skills are found:** user scope is `~/.mini-agent/skills/<name>/`, and project scope is
+  `./.mini-agent/skills/<name>/`. `~/.claude/skills` and `./.claude/skills` are read too, for
+  compatibility with Claude Code. Project overrides user, and invalid skills are skipped with a
+  warning.
+- **Progressive disclosure:** only each skill's name and description go into the system prompt,
+  as an `<available_skills>` list. The model calls `use_skill(name)` to load the full
+  instructions, the skill's folder path and its file list. It then reads files or runs scripts
+  by full path with the normal tools. Skills already loaded are listed in compaction summaries,
+  so the model can load them again if their instructions were summarized away.
+- **CLI:**
+
+      mini-agent skill add examples/skills/go-test-fixer       # a folder, user scope
+      mini-agent skill add https://github.com/anthropics/skills  # a git repo: installs every skill in it
+      mini-agent skill add ./my-skill --project --force         # project scope, replace if present
+      mini-agent skill list
+      mini-agent skill show go-test-fixer
+      mini-agent skill new my-skill [--project]                 # scaffold SKILL.md + scripts/
+      mini-agent skill remove my-skill [--project]
+
+  `add` checks every SKILL.md before copying anything, skips `.git` and keeps scripts
+  executable.
+- **Example:** `examples/skills/go-test-fixer` is a workflow for fixing failing Go tests, with
+  `scripts/failing-tests.sh`. Install it, then run `mini-agent "fix the failing tests"` in
+  `examples/buggy`. The log shows `[skills] loaded go-test-fixer`.
