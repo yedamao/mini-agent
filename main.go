@@ -88,18 +88,27 @@ func main() {
 	// command is aborted, retries stop, and we exit cleanly.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	args := os.Args[1:]
+	// `mini-agent mcp ...` edits the MCP config; it needs no API key.
+	if len(args) > 0 && args[0] == "mcp" {
+		if err := mcpCommand(ctx, args[1:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if apiKey == "" {
 		fmt.Fprintln(os.Stderr, "no API key: set AGENT_API_KEY or DEEPSEEK_API_KEY")
 		os.Exit(1)
 	}
-	if path := os.Getenv("AGENT_MCP"); path != "" {
-		if err := startMCP(path); err != nil {
-			fmt.Fprintln(os.Stderr, "mcp:", err)
-			os.Exit(1)
-		}
-		defer stopMCP()
+	// Connect to the configured MCP servers (local and remote).
+	servers, err := mcpServers()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mcp config:", err)
+		os.Exit(1)
 	}
-	args := os.Args[1:]
+	startMCP(ctx, servers)
+	defer stopMCP()
 	if len(args) > 0 && args[0] == "-i" {
 		repl(ctx)
 		return
@@ -108,7 +117,7 @@ func main() {
 	if len(args) > 0 {
 		prompt = strings.Join(args, " ")
 	}
-	_, err := runAgent(ctx, []Message{{Role: "user", Content: prompt}}, prompt)
+	_, err = runAgent(ctx, []Message{{Role: "user", Content: prompt}}, prompt)
 	if err != nil {
 		code := 1
 		if errors.Is(err, errStepLimit) {

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,5 +92,38 @@ func TestGoTestReportsFailure(t *testing.T) {
 	got, isErr := call(t, connect(t), "go_test", map[string]any{"dir": dir})
 	if !isErr || !strings.Contains(got, "boom") {
 		t.Errorf("want failure as isError, got %q (isError=%v)", got, isErr)
+	}
+}
+
+// bearerClient sends a fixed Authorization header.
+type bearerClient struct{ token string }
+
+func (b bearerClient) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+b.token)
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+func TestStreamableHTTPWithToken(t *testing.T) {
+	srv := httptest.NewServer(httpHandler(newServer(), "s3cret"))
+	defer srv.Close()
+	ctx := context.Background()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+
+	// Without the token the handshake is rejected.
+	if _, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: srv.URL + "/mcp"}, nil); err == nil {
+		t.Fatal("want unauthorized without a token")
+	}
+	cs, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint:   srv.URL + "/mcp",
+		HTTPClient: &http.Client{Transport: bearerClient{"s3cret"}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	got, isErr := call(t, cs, "word_count", map[string]any{"text": "one two three"})
+	if isErr || got != "words: 3, lines: 1, characters: 13" {
+		t.Errorf("got %q (isError=%v)", got, isErr)
 	}
 }

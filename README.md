@@ -58,9 +58,7 @@ Day 8: an MCP server, and the agent as an MCP client.
       claude mcp add --scope user mini-mcp -- ~/.local/bin/mini-mcp
       claude mcp list
 
-- The agent can use any stdio MCP server's tools: `AGENT_MCP=~/.local/bin/mini-mcp go run . "..."`.
-  They show up as `mcp__<name>`. The client in `mcp.go` is hand-written to show the
-  handshake; for a real client, use the SDK's `mcp.NewClient` + `mcp.CommandTransport`.
+- The agent is an MCP client too (official SDK). See "Remote MCP servers" below.
 - `examples/mcp-from-scratch` is the same server written with the standard library only.
   It's for learning the protocol (newline-delimited JSON-RPC 2.0: `initialize`,
   `notifications/initialized`, `tools/list`, `tools/call`), not for shipping. Talk to it by hand:
@@ -103,3 +101,51 @@ Rules this follows:
 
 `examples/RUN-temporal.md` shows a durability demo: the worker is killed in the middle of
 a run, restarted, and the workflow completes.
+
+Remote MCP servers (Streamable HTTP) and multiple servers.
+
+The agent's MCP client (`mcp.go`) is built on the official go-sdk (`mcp.NewClient`). It
+connects to every configured server at startup and offers their tools to the model as
+`mcp__<server>__<tool>`; each call goes to the server that owns the tool. A server that
+fails to connect is reported and skipped. Supported transports:
+- `stdio`: a local command (`mcp.CommandTransport`)
+- `http`: Streamable HTTP, the current remote transport (`mcp.StreamableClientTransport`)
+- `sse`: the older HTTP+SSE transport (`mcp.SSEClientTransport`)
+
+Manage servers like `claude mcp`:
+
+    mini-agent mcp add local ~/.local/bin/mini-mcp                  # stdio
+    mini-agent mcp add deepwiki https://mcp.deepwiki.com/mcp         # remote, no auth
+    mini-agent mcp add -H 'Authorization: Bearer ${MY_TOKEN}' work https://example.com/mcp
+    mini-agent mcp add -t sse old https://example.com/sse            # legacy SSE
+    mini-agent mcp list        # checks each server: ✔ connected, N tools
+    mini-agent mcp get work
+    mini-agent mcp remove work
+
+Config lives in `~/.mini-agent/mcp.json` (or `$AGENT_MCP_CONFIG`). It uses the same shape as
+Claude Code's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "local":  { "command": "/Users/you/.local/bin/mini-mcp", "args": [], "env": {} },
+    "remote": { "type": "http", "url": "http://127.0.0.1:8090/mcp",
+                "headers": { "Authorization": "Bearer ${MINI_MCP_TOKEN}" } }
+  }
+}
+```
+
+`${VAR}` in `headers`, `env`, `url`, `command` and `args` is filled in from the environment
+when connecting, so tokens stay in env vars, not in the file. Quote the `-H` value in single
+quotes so your shell doesn't expand it. A missing variable is an error, not an empty header.
+The file is written with 0600 permissions. `AGENT_MCP=<command>` still works as a shortcut
+for one extra stdio server.
+
+`mini-mcp` can be a remote server too:
+
+    MINI_MCP_TOKEN=$(openssl rand -hex 16) mini-mcp -http 127.0.0.1:8090    # endpoint: /mcp
+    mini-agent mcp add -H 'Authorization: Bearer ${MINI_MCP_TOKEN}' remote http://127.0.0.1:8090/mcp
+
+With `MINI_MCP_TOKEN` set it requires that bearer token; without it, anyone who can reach the
+port can call `go_test`, so bind to 127.0.0.1. If you use a proxy, set
+`NO_PROXY=localhost,127.0.0.1` so local servers aren't sent through it.

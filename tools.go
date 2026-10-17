@@ -17,10 +17,10 @@ var toolDefs = append([]map[string]any{}, tools.Defs...)
 
 type toolInput = tools.Input
 
-// runTool runs a built-in tool, or forwards mcp__ tools to the MCP server.
+// runTool runs a built-in tool, or forwards mcp__ tools to the MCP server that owns them.
 func runTool(ctx context.Context, name string, raw json.RawMessage) string {
-	if strings.HasPrefix(name, mcpPrefix) && mcp != nil {
-		return callMCPTool(name, raw) // Day 8: tools from an MCP server
+	if strings.HasPrefix(name, mcpPrefix) && hub != nil {
+		return callMCPTool(ctx, name, raw)
 	}
 	return tools.Run(ctx, "", name, raw)
 }

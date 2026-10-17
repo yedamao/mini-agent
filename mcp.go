@@ -1,173 +1,271 @@
 package main
 
-// Day 8: mini-agent as an MCP client.
-// With AGENT_MCP=/path/to/server, the agent starts that server, lists its
-// tools and offers them to the model with an "mcp__" prefix. When the model
-// calls one, the agent forwards it to the server with tools/call.
+// MCP client support, built on the official SDK (github.com/modelcontextprotocol/go-sdk).
+//
+// At startup the agent connects to every server in the MCP config (see
+// internal/mcpconf and `mini-agent mcp add`), lists their tools and offers them
+// to the model as mcp__<server>__<tool>. Tool calls are routed back to the
+// session of the server that owns the tool.
+//
+// Transports: stdio (a local command), Streamable HTTP (remote, the current
+// spec) and SSE (the older remote transport).
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
-	"sync"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/yedamao/mini-agent/internal/mcpconf"
 )
 
 const mcpPrefix = "mcp__"
 
-// mcpClient talks JSON-RPC to one server over its stdin/stdout.
-// Requests are sent one at a time, which keeps this simple.
-type mcpClient struct {
-	mu     sync.Mutex
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bufio.Scanner
-	nextID int
+// mcpTool remembers which session owns a tool offered to the model.
+type mcpTool struct {
+	session *mcp.ClientSession
+	server  string
+	name    string // the tool's name on its server
 }
 
-var mcp *mcpClient // nil unless AGENT_MCP is set
+// mcpHub holds the open sessions and the tool routing table.
+type mcpHub struct {
+	sessions map[string]*mcp.ClientSession
+	tools    map[string]mcpTool // model-facing name -> owner
+}
 
-// startMCP launches the server, does the handshake and adds its tools.
-func startMCP(path string) error {
-	cmd := exec.Command(path)
-	cmd.Stderr = os.Stderr // server logs show up in ours
-	stdin, err := cmd.StdinPipe()
+var hub *mcpHub // nil when no MCP servers are configured
+
+// mcpServers returns the servers to connect to: the config file, plus
+// AGENT_MCP=<command> as a shortcut for one stdio server.
+func mcpServers() (map[string]mcpconf.Server, error) {
+	cfg, err := mcpconf.Load(mcpconf.DefaultPath())
 	if err != nil {
-		return err
+		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
+	servers := cfg.MCPServers
+	if path := os.Getenv("AGENT_MCP"); path != "" {
+		name := sanitize(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+		servers[name] = mcpconf.Server{Command: path}
+	}
+	return servers, nil
+}
+
+// startMCP connects to all servers and adds their tools to toolDefs.
+// A server that fails is reported and skipped; the others still work.
+func startMCP(ctx context.Context, servers map[string]mcpconf.Server) {
+	if len(servers) == 0 {
+		return
+	}
+	hub = &mcpHub{sessions: map[string]*mcp.ClientSession{}, tools: map[string]mcpTool{}}
+	for _, name := range sortedKeys(servers) {
+		session, tools, err := connectServer(ctx, name, servers[name], 30*time.Second)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[mcp] %s: %v (skipped)\n", name, err)
+			continue
+		}
+		hub.sessions[name] = session
+		var names []string
+		for _, t := range tools {
+			fullName := toolName(name, t.Name)
+			hub.tools[fullName] = mcpTool{session: session, server: name, name: t.Name}
+			toolDefs = append(toolDefs, map[string]any{
+				"name":         fullName,
+				"description":  "[MCP " + name + "] " + t.Description,
+				"input_schema": schemaOf(t),
+			})
+			names = append(names, fullName)
+		}
+		fmt.Fprintf(os.Stderr, "[mcp] %s (%s): %s\n", name, servers[name].Transport(), strings.Join(names, ", "))
+	}
+}
+
+// connectServer opens a session and lists the server's tools, giving up
+// after timeout.
+//
+// ctx must outlive the session: some transports (SSE) keep their stream
+// tied to the context given to Connect. So the timeout is applied by
+// waiting, not by cancelling ctx.
+func connectServer(ctx context.Context, name string, s mcpconf.Server, timeout time.Duration) (*mcp.ClientSession, []*mcp.Tool, error) {
+	transport, err := newTransport(s)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	if err := cmd.Start(); err != nil {
-		return err
+	client := mcp.NewClient(&mcp.Implementation{Name: "mini-agent", Version: "0.3.0"}, nil)
+	type result struct {
+		session *mcp.ClientSession
+		err     error
 	}
-	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 1024*1024), 10*1024*1024)
-	c := &mcpClient{cmd: cmd, stdin: stdin, stdout: sc}
-
-	// 1. initialize: agree on a protocol version and introduce ourselves.
-	var initRes struct {
-		ServerInfo struct{ Name, Version string } `json:"serverInfo"`
+	done := make(chan result, 1)
+	go func() {
+		session, err := client.Connect(ctx, transport, nil)
+		done <- result{session, err}
+	}()
+	var session *mcp.ClientSession
+	select {
+	case r := <-done:
+		if r.err != nil {
+			return nil, nil, fmt.Errorf("connect: %w", r.err)
+		}
+		session = r.session
+	case <-time.After(timeout):
+		go func() { // close it if it connects later
+			if r := <-done; r.session != nil {
+				r.session.Close()
+			}
+		}()
+		return nil, nil, fmt.Errorf("connect: timed out after %s", timeout)
 	}
-	if err := c.call("initialize", map[string]any{
-		"protocolVersion": "2025-06-18",
-		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "mini-agent", "version": "0.1.0"},
-	}, &initRes); err != nil {
-		return fmt.Errorf("initialize: %w", err)
+	lctx, cancel := context.WithTimeout(ctx, timeout) // plain requests can use a timeout ctx
+	defer cancel()
+	var tools []*mcp.Tool
+	for t, err := range session.Tools(lctx, nil) { // pages through tools/list
+		if err != nil {
+			session.Close()
+			return nil, nil, fmt.Errorf("list tools: %w", err)
+		}
+		tools = append(tools, t)
 	}
-	// 2. tell the server we're ready (a notification: no reply).
-	if err := c.send(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"}); err != nil {
-		return err
-	}
-	// 3. list tools and convert them to the model API's tool format.
-	var list struct {
-		Tools []struct {
-			Name        string         `json:"name"`
-			Description string         `json:"description"`
-			InputSchema map[string]any `json:"inputSchema"`
-		} `json:"tools"`
-	}
-	if err := c.call("tools/list", map[string]any{}, &list); err != nil {
-		return fmt.Errorf("tools/list: %w", err)
-	}
-	var names []string
-	for _, t := range list.Tools {
-		toolDefs = append(toolDefs, map[string]any{
-			"name":         mcpPrefix + t.Name,
-			"description":  "[MCP " + initRes.ServerInfo.Name + "] " + t.Description,
-			"input_schema": t.InputSchema,
-		})
-		names = append(names, mcpPrefix+t.Name)
-	}
-	fmt.Fprintf(os.Stderr, "[mcp] connected to %s %s, tools: %s\n",
-		initRes.ServerInfo.Name, initRes.ServerInfo.Version, strings.Join(names, ", "))
-	mcp = c
-	return nil
+	return session, tools, nil
 }
 
-func (c *mcpClient) send(msg any) error {
-	b, err := json.Marshal(msg)
+// newTransport builds the SDK transport for a config entry.
+func newTransport(s mcpconf.Server) (mcp.Transport, error) {
+	if err := s.Validate(); err != nil {
+		return nil, err
+	}
+	s, err := s.Expanded() // ${VAR} -> value, only in memory
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = c.stdin.Write(append(b, '\n'))
-	return err
+	switch s.Transport() {
+	case "stdio":
+		cmd := exec.Command(s.Command, s.Args...)
+		cmd.Env = os.Environ()
+		for k, v := range s.Env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+		cmd.Stderr = os.Stderr // server logs show up in ours
+		return &mcp.CommandTransport{Command: cmd}, nil
+	case "http":
+		return &mcp.StreamableClientTransport{Endpoint: s.URL, HTTPClient: httpClientWithHeaders(s.Headers)}, nil
+	case "sse":
+		return &mcp.SSEClientTransport{Endpoint: s.URL, HTTPClient: httpClientWithHeaders(s.Headers)}, nil
+	}
+	return nil, fmt.Errorf("unsupported transport %q", s.Transport())
 }
 
-// call sends a request and waits for the response with the same id,
-// skipping any notifications the server sends in between.
-func (c *mcpClient) call(method string, params any, result any) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.nextID++
-	id := c.nextID
-	if err := c.send(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
-		return err
-	}
-	for c.stdout.Scan() {
-		var resp struct {
-			ID     *int            `json:"id"`
-			Result json.RawMessage `json:"result"`
-			Error  *struct {
-				Code    int    `json:"code"`
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		if err := json.Unmarshal(c.stdout.Bytes(), &resp); err != nil || resp.ID == nil || *resp.ID != id {
-			continue // not our response (or a notification)
-		}
-		if resp.Error != nil {
-			return fmt.Errorf("mcp error %d: %s", resp.Error.Code, resp.Error.Message)
-		}
-		return json.Unmarshal(resp.Result, result)
-	}
-	if err := c.stdout.Err(); err != nil {
-		return err
-	}
-	return errors.New("mcp server closed the connection")
+// headerTransport adds fixed headers (e.g. Authorization) to every request.
+type headerTransport struct {
+	headers map[string]string
+	base    http.RoundTripper
 }
 
-// callMCPTool forwards a tool call; name still has the mcp__ prefix.
-func callMCPTool(name string, input json.RawMessage) string {
+func (t headerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context()) // RoundTrippers must not modify the caller's request
+	for k, v := range t.headers {
+		r.Header.Set(k, v)
+	}
+	return t.base.RoundTrip(r)
+}
+
+func httpClientWithHeaders(h map[string]string) *http.Client {
+	if len(h) == 0 {
+		return nil // SDK default
+	}
+	return &http.Client{Transport: headerTransport{headers: h, base: http.DefaultTransport}}
+}
+
+// callMCPTool forwards a model tool call to the server that owns the tool.
+func callMCPTool(ctx context.Context, name string, input json.RawMessage) string {
+	t, ok := hub.tools[name]
+	if !ok {
+		return "error: unknown MCP tool " + name
+	}
 	args := map[string]any{}
 	if len(input) > 0 {
 		if err := json.Unmarshal(input, &args); err != nil {
 			return "error: bad input: " + err.Error()
 		}
 	}
-	var res struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-		IsError bool `json:"isError"`
-	}
-	if err := mcp.call("tools/call", map[string]any{"name": strings.TrimPrefix(name, mcpPrefix), "arguments": args}, &res); err != nil {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	res, err := t.session.CallTool(ctx, &mcp.CallToolParams{Name: t.name, Arguments: args})
+	if err != nil {
 		return "error: " + err.Error()
 	}
 	var parts []string
 	for _, c := range res.Content {
-		if c.Type == "text" {
+		switch c := c.(type) {
+		case *mcp.TextContent:
 			parts = append(parts, c.Text)
+		default:
+			b, _ := json.Marshal(c) // images etc.: show the raw JSON
+			parts = append(parts, string(b))
 		}
 	}
 	out := strings.Join(parts, "\n")
+	if out == "" && res.StructuredContent != nil {
+		b, _ := json.Marshal(res.StructuredContent)
+		out = string(b)
+	}
 	if res.IsError {
 		out = "error: " + out
 	}
 	return truncate(out)
 }
 
-// stopMCP closes the server's stdin (it exits on EOF) and waits for it.
+// stopMCP closes every session (stdio servers are terminated).
 func stopMCP() {
-	if mcp != nil {
-		mcp.stdin.Close()
-		mcp.cmd.Wait()
+	if hub == nil {
+		return
 	}
+	for _, s := range hub.sessions {
+		s.Close()
+	}
+	hub = nil
+}
+
+// toolName builds mcp__<server>__<tool>, kept within the 64-character
+// limit and the [A-Za-z0-9_-] alphabet that model tool names allow.
+func toolName(server, tool string) string {
+	n := mcpPrefix + sanitize(server) + "__" + sanitize(tool)
+	if len(n) > 64 {
+		n = n[:64]
+	}
+	return n
+}
+
+func sanitize(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '_' || r == '-' || ('a' <= r && r <= 'z') || ('A' <= r && r <= 'Z') || ('0' <= r && r <= '9') {
+			return r
+		}
+		return '_'
+	}, s)
+}
+
+// schemaOf returns a tool's input schema as a plain JSON object.
+func schemaOf(t *mcp.Tool) any {
+	if t.InputSchema == nil {
+		return map[string]any{"type": "object", "properties": map[string]any{}}
+	}
+	return t.InputSchema
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
