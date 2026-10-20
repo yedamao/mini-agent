@@ -43,6 +43,10 @@ Finish with a short answer or summary of what you changed.`
 // maxSteps caps the loop so a confused model can't run forever.
 const maxSteps = 20
 
+// truncatedToolMsg is sent back instead of running a tool call cut off by max_tokens
+// (its input may be incomplete), so the model can retry with a smaller call.
+const truncatedToolMsg = "error: your reply hit max_tokens before this tool call finished, so it was not run. Retry with smaller input or split the work."
+
 // errStepLimit is returned when the loop hits maxSteps without a final answer.
 var errStepLimit = errors.New("step limit reached")
 
@@ -276,7 +280,10 @@ func runAgent(ctx context.Context, msgs []Message, request string) ([]Message, e
 					fmt.Println(b.Text)
 				}
 			case "tool_use":
-				out := runTool(ctx, b.Name, b.Input)
+				out := truncatedToolMsg
+				if r.StopReason != "max_tokens" {
+					out = runTool(ctx, b.Name, b.Input)
+				}
 				remember(b, out)
 				// Log to stderr so stdout stays just the model's answer.
 				if !quiet {
@@ -291,7 +298,9 @@ func runAgent(ctx context.Context, msgs []Message, request string) ([]Message, e
 				results = append(results, Block{Type: "tool_result", ToolUseID: b.ID, Content: out})
 			}
 		}
-		if r.StopReason != "tool_use" || len(results) == 0 {
+		// Every tool_use needs a tool_result in the next message, whatever the
+		// stop reason, or the next call is rejected. So any tool call continues the loop.
+		if len(results) == 0 {
 			return msgs, nil
 		}
 		msgs = append(msgs, Message{Role: "user", Content: results})

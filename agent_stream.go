@@ -68,7 +68,10 @@ func runAgentStream(ctx context.Context, msgs []Message, request string, h agent
 					}
 				}
 			case "tool_use":
-				out := runTool(ctx, b.Name, b.Input)
+				out := truncatedToolMsg
+				if r.StopReason != "max_tokens" {
+					out = runTool(ctx, b.Name, b.Input)
+				}
 				remember(b, out)
 				if h.OnTool != nil {
 					h.OnTool(step, b.Name, preview(string(b.Input), 80), preview(out, 120))
@@ -79,7 +82,9 @@ func runAgentStream(ctx context.Context, msgs []Message, request string, h agent
 				results = append(results, Block{Type: "tool_result", ToolUseID: b.ID, Content: out})
 			}
 		}
-		if r.StopReason != "tool_use" || len(results) == 0 {
+		// Every tool_use needs a tool_result in the next message, whatever the
+		// stop reason, or the next call is rejected. So any tool call continues the loop.
+		if len(results) == 0 {
 			return msgs, nil
 		}
 		msgs = append(msgs, Message{Role: "user", Content: results})
